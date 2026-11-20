@@ -99,7 +99,7 @@ class MainActivity : ComponentActivity() {
 data class Shared(val seq: Int, val text: String)
 
 @Composable
-private fun YomiTheme(content: @Composable () -> Unit) {
+fun YomiTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     val dark = isSystemInDarkTheme()
     val colors = when {
@@ -377,6 +377,7 @@ private fun InputTab(
                 Button(onClick = onSaveSettings) { Text("保存") }
                 OutlinedButton(onClick = onClearCache) { Text("キャッシュを削除") }
             }
+            OutlinedButton(onClick = { DictActivity.open(context) }) { Text("読み辞書を編集") }
         }
     }
 }

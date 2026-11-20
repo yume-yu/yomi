@@ -29,6 +29,14 @@
             </intent-filter>
         </activity>
 
+        <!-- speech-proxy の読み辞書編集画面を WebView で開く。
+             回転で作り直すと編集中の内容が消えるので、configChanges で作り直さない -->
+        <activity
+            android:name=".DictActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- 文字選択メニューの「読み上げ」。画面を出さずに読み上げる -->
         <activity
             android:name=".ProcessTextActivity"

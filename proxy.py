@@ -2,12 +2,15 @@
 """
 speech.cpp の前に立つ中継サーバー。
 
-- /v1/audio/transcriptions  音声を WAV に変換してから渡す（speech.cpp は WAV しか読まない）
+- /v1/audio/transcriptions  音声を WAV に変換してから渡す（speech.cpp は WAV しか読めない）
 - /v1/audio/speech          読み上げ前にテキストを整形・置換してから渡す
                             response_format=opus なら WAV で受けて Ogg Opus に変換して返す
                             voice ごとの既定値（速度など）を補完する
 - /dict/preview             置換結果だけを確認する（音声は生成しない）
 - /dict/check               TTS → ASR を往復させて誤読を洗い出す
+- /dict (GET/POST)          辞書の全件取得・保存（書式検証・原子書き込み付き）
+- /dict/export              辞書の TSV をそのままダウンロード
+- /dict/ui                  辞書の編集・プレビュー用 Web UI
 """
 
 import asyncio
@@ -30,6 +33,9 @@ TTS_DICT_FILE = os.environ.get("SPEECH_TTS_DICT", "")
 STRIP_MARKDOWN = os.environ.get("SPEECH_STRIP_MARKDOWN", "1") != "0"
 TIMEOUT = float(os.environ.get("SPEECH_TIMEOUT", "300"))
 OPUS_BITRATE = os.environ.get("SPEECH_OPUS_BITRATE", "24k")
+
+# 辞書 UI の場所。空ならディレクトリ探索（dict_ui.html が proxy.py の隣にある場合）。
+DICT_UI_FILE = os.environ.get("SPEECH_DICT_UI", "")
 
 # voice ごとの既定値。リクエストに同じキーがあればそちらを優先する。
 # 環境変数 SPEECH_VOICE_DEFAULTS に JSON で渡しても上書きできる。
@@ -68,6 +74,45 @@ class Dictionary:
         except OSError:
             return 0.0
 
+    def _parse(self, text: str) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]:
+        """TSV 文字列を (regex_rules, literal_rules, errors) に分解する。"""
+        regex_rules: list[tuple[str, str]] = []
+        literal: dict[str, str] = {}
+        errors: list[str] = []
+        seen_regex: dict[str, int] = {}
+        seen_literal: dict[str, int] = {}
+        for lineno, line in enumerate(text.split("\n"), 1):
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if "\t" not in line:
+                errors.append(f"{lineno}行目: タブ区切りではない")
+                continue
+            key, _, value = line.partition("\t")
+            key = key.strip()
+            value = value.strip()
+            if not key:
+                errors.append(f"{lineno}行目: キーが空")
+                continue
+            if key.startswith("re:"):
+                expr = key[3:]
+                try:
+                    re.compile(expr)
+                except re.error as e:
+                    errors.append(f"{lineno}行目: 正規表現が不正 ({e})")
+                    continue
+                if expr in seen_regex:
+                    errors.append(f"{lineno}行目: 正規表現 {expr!r} が重複")
+                    continue
+                seen_regex[expr] = lineno
+                regex_rules.append((expr, value))
+            else:
+                if key in seen_literal:
+                    errors.append(f"{lineno}行目: キー {key!r} が重複")
+                    continue
+                seen_literal[key] = lineno
+                literal[key] = value
+        return regex_rules, list(literal.items()), errors
+
     def reload(self, force: bool = False) -> None:
         if not self.path:
             return
@@ -76,35 +121,23 @@ class Dictionary:
             return
         with self._lock:
             self._mtime = mtime
-            regex_rules = []
-            literal_map = {}
-            errors = []
+            regex_rules: list[tuple[re.Pattern, str]] = []
+            literal_map: dict[str, str] = {}
+            errors: list[str] = []
             try:
                 with open(self.path, encoding="utf-8") as f:
-                    for lineno, raw in enumerate(f, 1):
-                        line = raw.rstrip("\n")
-                        if not line.strip() or line.lstrip().startswith("#"):
-                            continue
-                        if "\t" not in line:
-                            errors.append(f"{lineno}行目: タブ区切りではない")
-                            continue
-                        key, _, value = line.partition("\t")
-                        key = key.strip()
-                        value = value.strip()
-                        if not key:
-                            continue
-                        if key.startswith("re:"):
-                            expr = key[3:]
-                            try:
-                                regex_rules.append((re.compile(expr), value))
-                            except re.error as e:
-                                errors.append(f"{lineno}行目: 正規表現が不正 ({e})")
-                        else:
-                            literal_map[key] = value
+                    raw = f.read()
             except FileNotFoundError:
-                errors.append("辞書ファイルが見つかりません")
+                raw = None
             except Exception as e:  # noqa: BLE001
-                errors.append(str(e))
+                raw = None
+            if raw is None:
+                errors.append("辞書ファイルが見つかりません")
+            else:
+                exprs, literals, errors = self._parse(raw)
+                for expr, value in exprs:
+                    regex_rules.append((re.compile(expr), value))
+                literal_map = dict(literals)
 
             self._regex_rules = regex_rules
             self._literal_map = literal_map
@@ -141,6 +174,102 @@ class Dictionary:
                 "loaded_at": self._mtime,
                 "error": self._error,
             }
+
+    # ---- 全件取得・保存（dict UI 用） -------------------------------------
+
+    def rules(self) -> list[dict]:
+        """現在の内容を {kind, pattern, replacement, line} のリストで返す。"""
+        self.reload()
+        if not self.path or not os.path.exists(self.path):
+            return []
+        with open(self.path, encoding="utf-8") as f:
+            raw = f.read()
+        exprs, literals, _ = self._parse(raw)
+        out: list[dict] = []
+        for expr, value in exprs:
+            out.append({"kind": "regex", "pattern": expr, "replacement": value})
+        for key, value in literals:
+            out.append({"kind": "literal", "pattern": key, "replacement": value})
+        return out
+
+    def save(self, rules: list[dict]) -> dict:
+        """検証して TSV として原子書き込みする。エラーがあれば書き込まない。"""
+        if not self.path:
+            return {"error": "辞書ファイルのパスが未設定 (SPEECH_TTS_DICT)"}
+        text = render_rules(rules)
+        _, _, errors = self._parse(text)
+        if errors:
+            return {"saved": False, "errors": errors}
+        self._write_atomic(text)
+        self.reload(force=True)
+        with self._lock:
+            return {
+                "saved": True,
+                "errors": [],
+                "literal_rules": len(self._literal_map),
+                "regex_rules": len(self._regex_rules),
+                "loaded_at": self._mtime,
+            }
+
+    def _write_atomic(self, text: str) -> None:
+        d = os.path.dirname(self.path) or "."
+        fd, tmp = tempfile.mkstemp(prefix=".tts-dict-", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self.path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    def preview_rules(self, rules: list[dict], text: str) -> dict:
+        """保存前のルールで置換結果を計算する（ファイルは触らない）。"""
+        exprs, literals, errors = self._parse(render_rules(rules))
+        for expr, value in exprs:
+            text = re.compile(expr).sub(value, text)
+        literal_map = dict(literals)
+        if literal_map:
+            keys = sorted(literal_map, key=len, reverse=True)
+            pat = re.compile("|".join(re.escape(k) for k in keys))
+            text = pat.sub(lambda m: literal_map[m.group(0)], text)
+        return {"after": text, "errors": errors}
+
+
+def render_rules(rules: list[dict]) -> str:
+    """{kind, pattern, replacement} のリストを TSV 文字列に戻す。"""
+    lines = []
+    for rule in rules:
+        kind = rule.get("kind", "literal")
+        pattern = rule.get("pattern", "")
+        value = rule.get("replacement", "")
+        if not pattern:
+            continue
+        key = f"re:{pattern}" if kind == "regex" else pattern
+        lines.append(f"{key}\t{value}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def rules_from_tsv(text: str) -> list[dict]:
+    """TSV 文字列を rules リストに変換する（POST /dict の content 受け用）。"""
+    rules = []
+    for line in text.split("\n"):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if "\t" not in line:
+            continue
+        key, _, value = line.partition("\t")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if key.startswith("re:"):
+            rules.append({"kind": "regex", "pattern": key[3:], "replacement": value})
+        else:
+            rules.append({"kind": "literal", "pattern": key, "replacement": value})
+    return rules
 
 
 tts_dict = Dictionary(TTS_DICT_FILE)
@@ -350,6 +479,17 @@ async def dict_preview(body: dict):
     }
 
 
+@app.get("/dict/preview")
+async def dict_preview_get(text: str = ""):
+    """UI からクエリで呼べる版。POST と同じ内容。"""
+    stripped = strip_markdown(text) if STRIP_MARKDOWN else text
+    return {
+        "before": text,
+        "stripped": stripped,
+        "after": tts_dict.apply(stripped),
+    }
+
+
 @app.post("/dict/check")
 async def dict_check(body: dict):
     """TTS → ASR を往復させて、読み間違いを洗い出す。"""
@@ -387,6 +527,119 @@ _PUNCT = re.compile(r"[、。，．,.\s!?！？「」『』()（）]")
 
 def _normalize(text: str) -> str:
     return _PUNCT.sub("", text)
+
+
+# ---------------------------------------------------------------------------
+# 辞書の CRUD（dict UI 用）
+# ---------------------------------------------------------------------------
+
+
+@app.get("/dict")
+async def dict_get():
+    """現在の内容を rules リスト（+ status）で返す。"""
+    return {
+        "rules": tts_dict.rules(),
+        "status": tts_dict.status(),
+    }
+
+
+@app.post("/dict")
+async def dict_post(body: dict):
+    """辞書全体を保存する。
+
+    - rules: [{kind: "regex"|"literal", pattern, replacement}, ...] を渡す
+    - content: TSV 文字列をそのまま渡す（rules が優先）
+    検証（タブ区切り・正規表現コンパイル・重複）に失敗したら書き込まず
+    errors を返す。成功時は mtime 再読み込みで即反映される。
+    """
+    if "rules" in body:
+        rules = body["rules"]
+        if not isinstance(rules, list):
+            raise HTTPException(status_code=400, detail="rules must be a list")
+        result = tts_dict.save(rules)
+    elif "content" in body:
+        result = tts_dict.save(rules_from_tsv(body["content"]))
+    else:
+        raise HTTPException(status_code=400, detail="rules or content is required")
+    if not result.get("saved"):
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@app.post("/dict/validate")
+async def dict_validate(body: dict):
+    """保存せずに書式チェックだけする。"""
+    if "rules" in body:
+        rules = body["rules"]
+        if not isinstance(rules, list):
+            raise HTTPException(status_code=400, detail="rules must be a list")
+        text = render_rules(rules)
+    elif "content" in body:
+        text = body["content"]
+    else:
+        raise HTTPException(status_code=400, detail="rules or content is required")
+    _, _, errors = tts_dict._parse(text)
+    return {"valid": not errors, "errors": errors}
+
+
+@app.post("/dict/preview-rules")
+async def dict_preview_rules(body: dict):
+    """保存前のルールで置換結果を計算する（ファイルは触らない）。"""
+    if "rules" in body:
+        rules = body["rules"]
+        if not isinstance(rules, list):
+            raise HTTPException(status_code=400, detail="rules must be a list")
+        text = body.get("text", "")
+        stripped = strip_markdown(text) if STRIP_MARKDOWN else text
+        result = tts_dict.preview_rules(rules, stripped)
+        return {"before": text, "stripped": stripped, **result}
+    elif "content" in body:
+        text = body.get("text", "")
+        stripped = strip_markdown(text) if STRIP_MARKDOWN else text
+        result = tts_dict.preview_rules(rules_from_tsv(body["content"]), stripped)
+        return {"before": text, "stripped": stripped, **result}
+    else:
+        raise HTTPException(status_code=400, detail="rules or content is required")
+
+
+@app.get("/dict/export")
+async def dict_export():
+    """辞書の TSV をそのまま返す（バックアップ用）。"""
+    if not tts_dict.path or not os.path.exists(tts_dict.path):
+        raise HTTPException(status_code=404, detail="dict file not found")
+    with open(tts_dict.path, encoding="utf-8") as f:
+        raw = f.read()
+    return Response(
+        raw,
+        media_type="text/tab-separated-values; charset=utf-8",
+        headers={
+            "Content-Disposition": 'attachment; filename="tts-dict.tsv"'
+        },
+    )
+
+
+def _find_ui_file() -> str | None:
+    candidates = [
+        DICT_UI_FILE,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "dict_ui.html"),
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+
+
+@app.get("/dict/ui")
+async def dict_ui():
+    """辞書の編集・プレビュー用 Web UI を返す。"""
+    path = _find_ui_file()
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="dict_ui.html が見つかりません (SPEECH_DICT_UI も未設定)",
+        )
+    with open(path, encoding="utf-8") as f:
+        return Response(f.read(), media_type="text/html; charset=utf-8")
 
 
 @app.get("/dict/status")
