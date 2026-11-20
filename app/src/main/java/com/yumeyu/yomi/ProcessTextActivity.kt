@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -63,7 +64,7 @@ class ProcessTextActivity : ComponentActivity() {
 
                 override fun onPlayerError(error: PlaybackException) = finish()
             })
-        }, mainExecutor)
+        }, ContextCompat.getMainExecutor(this))
 
         // 取得に失敗した場合などに備えて、一定時間で必ず閉じる
         handler.postDelayed({ finish() }, TIMEOUT_MS)

@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,14 +17,25 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -31,17 +43,25 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+
+    /** 共有で受け取った文章。開いている最中に共有されても入力欄を差し替えられるよう、連番を付ける */
+    private val shared = mutableStateOf(Shared(0, ""))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,18 +73,30 @@ class MainActivity : ComponentActivity() {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        val shared = if (intent?.action == Intent.ACTION_SEND) {
-            intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
-        } else ""
+        receiveShared(intent)
 
         val settings = Settings(this)
+        val store = EpisodeStore.get(this)
         setContent {
             YomiTheme {
-                MainScreen(settings, shared)
+                MainScreen(settings, store, shared.value)
             }
         }
     }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        receiveShared(intent)
+    }
+
+    private fun receiveShared(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_SEND) return
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT) ?: return
+        shared.value = Shared(shared.value.seq + 1, text)
+    }
 }
+
+data class Shared(val seq: Int, val text: String)
 
 @Composable
 private fun YomiTheme(content: @Composable () -> Unit) {
@@ -79,14 +111,52 @@ private fun YomiTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = colors, content = content)
 }
 
+private const val CLIP_PREVIEW_MAX = 100
+private const val TAB_INPUT = 0
+private const val TAB_EPISODES = 1
+
 @Composable
-private fun MainScreen(settings: Settings, initialText: String) {
+private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) {
     val context = LocalContext.current
-    var text by rememberSaveable { mutableStateOf(initialText) }
+    var text by rememberSaveable { mutableStateOf(shared.text) }
     var voice by rememberSaveable { mutableStateOf(settings.voice) }
     var server by rememberSaveable { mutableStateOf(settings.serverUrl) }
     var model by rememberSaveable { mutableStateOf(settings.model) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    var tab by rememberSaveable { mutableIntStateOf(TAB_INPUT) }
+    /** 開いているエピソードのページ。null なら一覧 */
+    var openId by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // 画面の回転などで作り直されたときに上書きしないよう、処理済みの連番を覚えておく
+    var sharedSeq by rememberSaveable { mutableStateOf(shared.seq) }
+    LaunchedEffect(shared.seq) {
+        if (shared.seq != sharedSeq) {
+            sharedSeq = shared.seq
+            text = shared.text
+            tab = TAB_INPUT
+            openId = null
+        }
+    }
+
+    val episodes by store.episodes.collectAsState()
+    val pending by store.pending.collectAsState()
+    val playback by SpeakService.playback.collectAsState()
+
+    val actions = remember(context, store) {
+        EpisodeActions(context, store)
+    }
+
+    // LazyColumn は先頭に項目が増えても今見えている項目を保つので、新しいエピソードが画面外に隠れる。
+    // 新しいエピソードが増えていたら、エピソードタブを開いたときに先頭までスクロールする
+    val listState = rememberLazyListState()
+    val newestId = episodes.firstOrNull()?.id
+    var scrolledFor by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(newestId, tab, openId) {
+        if (tab == TAB_EPISODES && openId == null && newestId != null && newestId != scrolledFor) {
+            listState.scrollToItem(0)
+            scrolledFor = newestId
+        }
+    }
 
     fun save() {
         settings.voice = voice
@@ -94,80 +164,218 @@ private fun MainScreen(settings: Settings, initialText: String) {
         settings.model = model
     }
 
+    /** 入力欄の文章からエピソードを作り、作成を始める。play なら作れた所から再生もする */
+    fun createEpisode(play: Boolean) {
+        save()
+        val episode = store.create(text, settings.model, settings.voice) ?: return
+        GenerateService.enqueue(context, episode.id)
+        if (play) SpeakService.playEpisode(context, episode.id)
+        tab = TAB_EPISODES
+        openId = null
+    }
+
+    val opened = openId?.let { id -> episodes.firstOrNull { it.id == id } }
+    // 開いていたエピソードが削除されたら一覧に戻る
+    LaunchedEffect(openId, opened) {
+        if (openId != null && opened == null) openId = null
+    }
+    BackHandler(enabled = openId != null) { openId = null }
+
     Scaffold { padding ->
         Column(
             modifier = Modifier
                 .padding(padding)
                 .imePadding()
-                .padding(16.dp)
                 .fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                label = { Text("読み上げる文章") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-            )
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Settings.PRESET_VOICES.forEach { name ->
-                    FilterChip(
-                        selected = voice == name,
-                        onClick = { voice = name; settings.voice = name },
-                        label = { Text(name) },
-                    )
-                }
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        save()
-                        SpeakService.speak(context, text)
+            if (opened != null) {
+                EpisodeScreen(
+                    episode = opened,
+                    status = genStatus(opened, pending),
+                    playback = playback?.takeIf { it.episodeId == opened.id },
+                    actions = actions,
+                    onBack = { openId = null },
+                    onRestoreText = {
+                        text = opened.text
+                        tab = TAB_INPUT
+                        openId = null
                     },
-                    enabled = text.isNotBlank(),
-                ) { Text("読み上げる") }
-                OutlinedButton(onClick = { SpeakService.stop(context) }) { Text("止める") }
-                TextButton(onClick = { showSettings = !showSettings }) {
-                    Text(if (showSettings) "設定を閉じる" else "設定")
-                }
+                )
+                return@Column
             }
 
-            if (showSettings) {
-                OutlinedTextField(
-                    value = server,
-                    onValueChange = { server = it },
-                    label = { Text("サーバー") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+            TabRow(selectedTabIndex = tab) {
+                Tab(selected = tab == TAB_INPUT, onClick = { tab = TAB_INPUT }, text = { Text("読み上げ") })
+                Tab(
+                    selected = tab == TAB_EPISODES,
+                    onClick = { tab = TAB_EPISODES },
+                    text = {
+                        Text("エピソード（${episodes.size}）" + if (pending.isNotEmpty()) "・作成中" else "")
+                    },
                 )
-                OutlinedTextField(
-                    value = model,
-                    onValueChange = { model = it },
-                    label = { Text("モデル（空欄ならサーバーの既定）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                OutlinedTextField(
-                    value = voice,
-                    onValueChange = { voice = it },
-                    label = { Text("声（一覧にないものも指定できます）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = {
+            }
+            when (tab) {
+                TAB_INPUT -> InputTab(
+                    text = text,
+                    onTextChange = { text = it },
+                    voice = voice,
+                    onVoiceChange = { voice = it },
+                    onPresetVoice = { voice = it; settings.voice = it },
+                    server = server,
+                    onServerChange = { server = it },
+                    model = model,
+                    onModelChange = { model = it },
+                    showSettings = showSettings,
+                    onToggleSettings = { showSettings = !showSettings },
+                    onSpeak = { createEpisode(play = true) },
+                    onGenerateOnly = {
+                        createEpisode(play = false)
+                        Toast.makeText(context, "作成を始めました", Toast.LENGTH_SHORT).show()
+                    },
+                    onStop = { SpeakService.stop(context) },
+                    onSaveSettings = {
                         save()
                         Toast.makeText(context, "保存しました", Toast.LENGTH_SHORT).show()
-                    }) { Text("保存") }
-                    OutlinedButton(onClick = {
+                    },
+                    onClearCache = {
                         TtsClient.clearCache(context)
                         Toast.makeText(context, "キャッシュを削除しました", Toast.LENGTH_SHORT).show()
-                    }) { Text("キャッシュを削除") }
-                }
+                    },
+                )
+                else -> EpisodesTab(
+                    episodes = episodes,
+                    pending = pending,
+                    playback = playback,
+                    listState = listState,
+                    actions = actions,
+                    onOpen = { openId = it.id },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InputTab(
+    text: String,
+    onTextChange: (String) -> Unit,
+    voice: String,
+    onVoiceChange: (String) -> Unit,
+    onPresetVoice: (String) -> Unit,
+    server: String,
+    onServerChange: (String) -> Unit,
+    model: String,
+    onModelChange: (String) -> Unit,
+    showSettings: Boolean,
+    onToggleSettings: () -> Unit,
+    onSpeak: () -> Unit,
+    onGenerateOnly: () -> Unit,
+    onStop: () -> Unit,
+    onSaveSettings: () -> Unit,
+    onClearCache: () -> Unit,
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    /** 置き換えの確認中のクリップボードの文章。null なら確認ダイアログを出さない */
+    var pendingClip by remember { mutableStateOf<String?>(null) }
+
+    pendingClip?.let { clip ->
+        AlertDialog(
+            onDismissRequest = { pendingClip = null },
+            title = { Text("入力欄を置き換えますか？") },
+            text = {
+                Text(
+                    "今の文章は消えて、次の文章になります。\n\n" +
+                        clip.take(CLIP_PREVIEW_MAX) + if (clip.length > CLIP_PREVIEW_MAX) "…" else ""
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { onTextChange(clip); pendingClip = null }) { Text("置き換える") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingClip = null }) { Text("やめる") }
+            },
+        )
+    }
+    Column(
+        modifier = Modifier
+            .padding(16.dp)
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Spacer(Modifier.weight(1f))
+            FilledTonalButton(
+                onClick = {
+                    val clip = clipboard.getText()?.text
+                    when {
+                        clip.isNullOrBlank() ->
+                            Toast.makeText(context, "クリップボードに文章がありません", Toast.LENGTH_SHORT).show()
+                        // 入力欄が空なら消えるものがないので、確認せずに入れる
+                        text.isBlank() -> onTextChange(clip)
+                        else -> pendingClip = clip
+                    }
+                },
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                modifier = Modifier.height(36.dp),
+            ) { Text("クリップボードで置き換え", style = MaterialTheme.typography.labelLarge) }
+        }
+
+        OutlinedTextField(
+            value = text,
+            onValueChange = onTextChange,
+            label = { Text("読み上げる文章") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 160.dp, max = 360.dp),
+        )
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Settings.PRESET_VOICES.forEach { name ->
+                FilterChip(
+                    selected = voice == name,
+                    onClick = { onPresetVoice(name) },
+                    label = { Text(name) },
+                )
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(onClick = onSpeak, enabled = text.isNotBlank()) { Text("読み上げる") }
+            OutlinedButton(onClick = onGenerateOnly, enabled = text.isNotBlank()) { Text("作るだけ") }
+            OutlinedButton(onClick = onStop) { Text("止める") }
+        }
+
+        TextButton(onClick = onToggleSettings) {
+            Text(if (showSettings) "設定を閉じる" else "設定")
+        }
+
+        if (showSettings) {
+            OutlinedTextField(
+                value = server,
+                onValueChange = onServerChange,
+                label = { Text("サーバー") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = model,
+                onValueChange = onModelChange,
+                label = { Text("モデル（空欄ならサーバーの既定）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            OutlinedTextField(
+                value = voice,
+                onValueChange = onVoiceChange,
+                label = { Text("声（一覧にないものも指定できます）") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onSaveSettings) { Text("保存") }
+                OutlinedButton(onClick = onClearCache) { Text("キャッシュを削除") }
             }
         }
     }

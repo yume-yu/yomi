@@ -2,7 +2,12 @@ package com.yumeyu.yomi
 
 import android.content.Context
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import kotlin.coroutines.resumeWithException
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -20,11 +25,31 @@ import java.util.concurrent.TimeUnit
 class TtsClient(context: Context) {
     private val dir = cacheDir(context).apply { mkdirs() }
 
-    suspend fun fetch(serverUrl: String, model: String, voice: String, text: String): File =
+    /**
+     * 音声を取得してファイルを返す。
+     *
+     * [dest] を省略するとキャッシュに保存する。指定した場合はそこに保存し、
+     * キャッシュに同じ音声があればコピーして済ませる（通信しない）。
+     */
+    suspend fun fetch(
+        serverUrl: String,
+        model: String,
+        voice: String,
+        text: String,
+        dest: File? = null,
+    ): File =
         withContext(Dispatchers.IO) {
             val key = sha256("$model|$voice|$text")
-            val file = File(dir, "$key.ogg")
+            val cached = File(dir, "$key.ogg")
+            val file = dest ?: cached
             if (file.length() > 0) return@withContext file
+            if (dest != null && cached.length() > 0) {
+                // 一時ファイル経由にして、途中で落ちても壊れたファイルを完成品と見なさないようにする
+                val tmp = File(dest.parentFile, "${dest.name}.tmp")
+                val copied = runCatching { cached.copyTo(tmp, overwrite = true) }.isSuccess &&
+                    tmp.renameTo(dest)
+                if (copied) return@withContext dest
+            }
 
             val json = JSONObject()
             if (model.isNotBlank()) json.put("model", model)
@@ -39,18 +64,31 @@ class TtsClient(context: Context) {
                 .post(body)
                 .build()
 
-            http.newCall(request).execute().use { resp ->
+            await(http.newCall(request)).use { resp ->
                 if (!resp.isSuccessful) {
                     val detail = resp.body?.string()?.take(200).orEmpty()
                     throw IOException("サーバーが ${resp.code} を返しました: $detail")
                 }
-                val tmp = File(dir, "$key.tmp")
+                // 「キャッシュを削除」でフォルダごと消えていることがあるので、毎回作る。
+                // エピソードのフォルダは作らない（削除済みのエピソードを復活させないため）
+                if (dest == null) dir.mkdirs()
+                val tmp = File(file.parentFile, "$key.tmp")
                 resp.body!!.byteStream().use { input ->
                     tmp.outputStream().use { input.copyTo(it) }
                 }
-                if (!tmp.renameTo(file)) throw IOException("キャッシュに保存できません")
+                if (!tmp.renameTo(file)) throw IOException("音声を保存できません: $file")
             }
             file
+        }
+
+    /** キャンセルされたら通信も打ち切る */
+    private suspend fun await(call: Call): Response =
+        suspendCancellableCoroutine { cont ->
+            cont.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onResponse(call: Call, response: Response) = cont.resume(response) { _, r, _ -> r.close() }
+                override fun onFailure(call: Call, e: IOException) = cont.resumeWithException(e)
+            })
         }
 
     companion object {
