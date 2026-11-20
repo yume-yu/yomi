@@ -19,6 +19,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
@@ -32,6 +35,13 @@ class SpeakService : MediaSessionService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var job: Job? = null
 
+    private val errorListener = object : Player.Listener {
+        override fun onPlayerError(error: PlaybackException) {
+            android.util.Log.w("Yomi", "playback failed", error)
+            toast("再生できませんでした: ${error.errorCodeName}")
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         tts = TtsClient(this)
@@ -44,12 +54,7 @@ class SpeakService : MediaSessionService() {
                 /* handleAudioFocus = */ true,
             )
             .build()
-        player.addListener(object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                android.util.Log.w("Yomi", "playback failed", error)
-                toast("再生できませんでした: ${error.errorCodeName}")
-            }
-        })
+        player.addListener(errorListener)
         session = MediaSession.Builder(this, player).build()
         addSession(session)
     }
@@ -83,6 +88,7 @@ class SpeakService : MediaSessionService() {
                 } catch (e: Exception) {
                     android.util.Log.w("Yomi", "fetch failed: $server", e)
                     toast("読み上げに失敗しました: ${e.message}")
+                    _failures.update { it + 1 }
                     return@launch
                 }
                 enqueue(file, chunk, voice)
@@ -128,6 +134,9 @@ class SpeakService : MediaSessionService() {
 
     override fun onDestroy() {
         scope.cancel()
+        // 解放がタイムアウトすると ExoPlayer は再生エラーとして通知してくる。
+        // 後片付け中のエラーは利用者に知らせる必要がないので、先にリスナーを外す。
+        player.removeListener(errorListener)
         session.release()
         player.release()
         super.onDestroy()
@@ -141,6 +150,14 @@ class SpeakService : MediaSessionService() {
         private const val ACTION_SPEAK = "com.yumeyu.yomi.SPEAK"
         private const val ACTION_STOP = "com.yumeyu.yomi.STOP"
         private const val EXTRA_TEXT = "text"
+
+        private val _failures = MutableStateFlow(0)
+
+        /**
+         * 音声の取得に失敗した回数。同じプロセスの ProcessTextActivity が、
+         * 再生を待たずに閉じてよいかを知るために使う。
+         */
+        val failures: StateFlow<Int> get() = _failures
 
         fun speak(context: Context, text: String) {
             context.startService(
