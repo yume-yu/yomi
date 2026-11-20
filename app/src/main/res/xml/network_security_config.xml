@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- speech-proxy を HTTP で叩くため、この宛先だけ平文通信を許可する。
+     HTTPS 経由にしたらこのファイルごと消してよい。 -->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">192.168.1.6</domain>
+    </domain-config>
+</network-security-config>
