@@ -19,6 +19,8 @@ data class Episode(
     val ready: Int = 0,
     /** 作り終わったチャンクそれぞれの長さ（ミリ秒）。ready 個ぶん */
     val durationsMs: List<Long> = emptyList(),
+    /** 作り終わったチャンクそれぞれのファイルサイズ（バイト）。ready 個ぶん */
+    val sizesBytes: List<Long> = emptyList(),
     /** 最後に作ろうとして失敗したときの理由。作り直しを始めたら消す */
     val error: String? = null,
     /** 続きから再生するための位置 */
@@ -33,6 +35,9 @@ data class Episode(
             ?: "（空）"
 
     val readyDurationMs: Long get() = durationsMs.sum()
+
+    /** 作り終わった分の音声ファイルの合計サイズ */
+    val readySizeBytes: Long get() = sizesBytes.sum()
 
     /** チャンク index の頭が、エピソード全体の何ミリ秒目にあたるか */
     fun chunkStartMs(index: Int): Long = durationsMs.take(index).sum()
@@ -63,6 +68,7 @@ data class Episode(
         .put("chunks", JSONArray(chunks))
         .put("ready", ready)
         .put("durationsMs", JSONArray(durationsMs))
+        .put("sizesBytes", JSONArray(sizesBytes))
         .put("error", error ?: JSONObject.NULL)
         .put("resumeIndex", resumeIndex)
         .put("resumePositionMs", resumePositionMs)
@@ -75,6 +81,9 @@ data class Episode(
             val durations = o.optJSONArray("durationsMs")
                 ?.let { a -> List(a.length()) { a.getLong(it) } }
                 .orEmpty()
+            val sizes = o.optJSONArray("sizesBytes")
+                ?.let { a -> List(a.length()) { a.getLong(it) } }
+                .orEmpty()
             return Episode(
                 id = o.getString("id"),
                 createdAt = o.getLong("createdAt"),
@@ -84,6 +93,7 @@ data class Episode(
                 chunks = chunks,
                 ready = o.optInt("ready"),
                 durationsMs = durations,
+                sizesBytes = sizes,
                 error = if (o.isNull("error")) null else o.optString("error"),
                 resumeIndex = o.optInt("resumeIndex"),
                 resumePositionMs = o.optLong("resumePositionMs"),

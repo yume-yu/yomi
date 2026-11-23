@@ -127,8 +127,13 @@ class GenerateService : Service() {
                 return
             }
             val duration = withContext(Dispatchers.IO) { probeDurationMs(dest) }
+            val size = withContext(Dispatchers.IO) { dest.length() }
             val updated = store.update(id) {
-                it.copy(ready = i + 1, durationsMs = it.durationsMs.take(i) + duration)
+                it.copy(
+                    ready = i + 1,
+                    durationsMs = it.durationsMs.take(i) + duration,
+                    sizesBytes = it.sizesBytes.take(i) + size,
+                )
             }
             if (updated == null) {
                 // 作成中に削除された。書き込んだ分を片付ける

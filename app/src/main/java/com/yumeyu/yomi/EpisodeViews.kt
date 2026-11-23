@@ -388,7 +388,14 @@ private fun describe(episode: Episode, status: GenStatus): String {
         !episode.isComplete -> "途中まで $progress"
         else -> formatDuration(episode.readyDurationMs)
     }
-    return "$date · ${episode.voice} · $state"
+    return "$date · ${episode.voice} · $state · ${formatSize(episode.readySizeBytes)}"
+}
+
+/** Android の「ファイル」アプリと同じく 1000 区切りで表す */
+private fun formatSize(bytes: Long): String = when {
+    bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000.0)
+    bytes >= 1_000 -> "${bytes / 1_000} KB"
+    else -> "$bytes B"
 }
 
 private fun formatDuration(ms: Long): String {

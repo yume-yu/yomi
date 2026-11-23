@@ -90,11 +90,16 @@ class EpisodeStore private constructor(context: Context) {
             .map { it.consistentWithFiles() }
             .sortedByDescending { it.createdAt }
 
-    /** 途中で落ちた場合に備え、ready を実際にあるファイルに合わせる */
+    /**
+     * 途中で落ちた場合に備え、ready を実際にあるファイルに合わせる。
+     * ファイルサイズを持っていない（この項目を足す前に作った）エピソードは、ファイルから埋める。
+     */
     private fun Episode.consistentWithFiles(): Episode {
         var n = 0
         while (n < ready && chunkFile(id, n).length() > 0) n++
-        return if (n == ready) this else copy(ready = n, durationsMs = durationsMs.take(n))
+        val sizes = if (sizesBytes.size >= n) sizesBytes.take(n) else List(n) { chunkFile(id, it).length() }
+        return if (n == ready && sizes == sizesBytes) this
+        else copy(ready = n, durationsMs = durationsMs.take(n), sizesBytes = sizes)
     }
 
     companion object {

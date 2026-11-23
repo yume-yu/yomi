@@ -231,12 +231,18 @@ suspend fun regenerateChunk(context: Context, store: EpisodeStore, episode: Epis
     val tmp = File(target.parentFile, "$index.ogg.new")
     withContext(Dispatchers.IO) { tmp.delete() }
     TtsClient(context).fetch(server, episode.model, episode.voice, episode.chunks[index], tmp, dictVersion)
-    val duration = withContext(Dispatchers.IO) {
+    val (duration, size) = withContext(Dispatchers.IO) {
         if (!tmp.renameTo(target)) throw IOException("音声を差し替えられません")
-        GenerateService.probeDurationMs(target)
+        GenerateService.probeDurationMs(target) to target.length()
     }
     store.update(episode.id) { e ->
-        if (index >= e.durationsMs.size) e
-        else e.copy(durationsMs = e.durationsMs.toMutableList().also { it[index] = duration })
+        e.copy(
+            durationsMs = e.durationsMs.replaced(index, duration),
+            sizesBytes = e.sizesBytes.replaced(index, size),
+        )
     }
 }
+
+/** index が範囲内なら置き換えたリストを、範囲外ならそのまま返す */
+private fun List<Long>.replaced(index: Int, value: Long): List<Long> =
+    if (index !in indices) this else toMutableList().also { it[index] = value }
