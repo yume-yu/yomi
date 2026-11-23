@@ -111,12 +111,13 @@ class GenerateService : Service() {
     private suspend fun generate(id: String) {
         val start = store.update(id) { it.copy(error = null) } ?: return
         val server = Settings(this).serverUrl
+        val dictVersion = DictClient.version(server)
         for (i in start.ready until start.chunks.size) {
             val episode = store.get(id) ?: return
             notifyProgress(episode)
             val dest = store.chunkFile(id, i)
             try {
-                tts.fetch(server, episode.model, episode.voice, episode.chunks[i], dest)
+                tts.fetch(server, episode.model, episode.voice, episode.chunks[i], dest, dictVersion)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -245,7 +246,7 @@ class GenerateService : Service() {
             )
         }
 
-        private fun probeDurationMs(file: File): Long {
+        fun probeDurationMs(file: File): Long {
             val r = MediaMetadataRetriever()
             return try {
                 r.setDataSource(file.path)

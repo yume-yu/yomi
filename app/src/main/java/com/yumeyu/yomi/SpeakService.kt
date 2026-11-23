@@ -109,7 +109,9 @@ class SpeakService : MediaSessionService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_SPEAK -> intent.getStringExtra(EXTRA_TEXT)?.let { speak(it) }
-            ACTION_PLAY_EPISODE -> intent.getStringExtra(EXTRA_EPISODE_ID)?.let { playEpisode(it) }
+            ACTION_PLAY_EPISODE -> intent.getStringExtra(EXTRA_EPISODE_ID)?.let {
+                playEpisode(it, startIndex = intent.getIntExtra(EXTRA_INDEX, -1))
+            }
             ACTION_PAUSE -> player.pause()
             ACTION_SEEK -> {
                 val id = intent.getStringExtra(EXTRA_EPISODE_ID)
@@ -140,9 +142,10 @@ class SpeakService : MediaSessionService() {
         val voice = settings.voice
 
         job = scope.launch {
+            val dictVersion = DictClient.version(server)
             for (chunk in chunks) {
                 val file = try {
-                    tts.fetch(server, model, voice, chunk)
+                    tts.fetch(server, model, voice, chunk, dictVersion = dictVersion)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -158,9 +161,15 @@ class SpeakService : MediaSessionService() {
 
     // ---- エピソード ----
 
-    private fun playEpisode(id: String) {
+    /**
+     * [startIndex] を指定すると、そのチャンクの頭から読み込み直して再生する
+     * （作り直したチャンクの音声を、開いたままの古いファイルではなく新しいもので聞くため）。
+     */
+    private fun playEpisode(id: String, startIndex: Int = -1) {
         // 一時停止中の同じエピソードなら、その場から再開する
-        if (id == episodeId && player.mediaItemCount > 0 && player.playbackState != Player.STATE_ENDED) {
+        if (startIndex < 0 && id == episodeId && player.mediaItemCount > 0 &&
+            player.playbackState != Player.STATE_ENDED
+        ) {
             player.play()
             return
         }
@@ -172,7 +181,8 @@ class SpeakService : MediaSessionService() {
         val items = (0 until episode.ready).map { episodeItem(episode, it) }
         appended = items.size
         if (items.isNotEmpty()) {
-            val (index, position) = resumePoint(episode)
+            val (index, position) =
+                if (startIndex in items.indices) startIndex to 0L else resumePoint(episode)
             player.setMediaItems(items, index, position)
             player.prepare()
             player.play()
@@ -320,11 +330,13 @@ class SpeakService : MediaSessionService() {
             )
         }
 
-        fun playEpisode(context: Context, id: String) {
+        /** [startIndex] を指定すると、そのチャンクの頭から読み込み直して再生する */
+        fun playEpisode(context: Context, id: String, startIndex: Int = -1) {
             context.startService(
                 Intent(context, SpeakService::class.java)
                     .setAction(ACTION_PLAY_EPISODE)
                     .putExtra(EXTRA_EPISODE_ID, id)
+                    .putExtra(EXTRA_INDEX, startIndex)
             )
         }
 

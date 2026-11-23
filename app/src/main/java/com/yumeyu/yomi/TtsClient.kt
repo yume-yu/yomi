@@ -30,6 +30,9 @@ class TtsClient(context: Context) {
      *
      * [dest] を省略するとキャッシュに保存する。指定した場合はそこに保存し、
      * キャッシュに同じ音声があればコピーして済ませる（通信しない）。
+     *
+     * [dictVersion] は proxy の読み辞書の版（DictClient.version）。キャッシュのキーに含めるので、
+     * 辞書を直したあとは古い読みの音声を使わずに作り直す。
      */
     suspend fun fetch(
         serverUrl: String,
@@ -37,9 +40,10 @@ class TtsClient(context: Context) {
         voice: String,
         text: String,
         dest: File? = null,
+        dictVersion: String = "",
     ): File =
         withContext(Dispatchers.IO) {
-            val key = sha256("$model|$voice|$text")
+            val key = sha256("$model|$voice|$dictVersion|$text")
             val cached = File(dir, "$key.ogg")
             val file = dest ?: cached
             if (file.length() > 0) return@withContext file

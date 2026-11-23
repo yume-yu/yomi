@@ -61,6 +61,7 @@ class Dictionary:
     def __init__(self, path: str):
         self.path = path
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self._mtime = 0.0
         self._regex_rules: list[tuple[re.Pattern, str]] = []
         self._literal_pattern: re.Pattern | None = None
@@ -192,16 +193,32 @@ class Dictionary:
             out.append({"kind": "literal", "pattern": key, "replacement": value})
         return out
 
-    def save(self, rules: list[dict]) -> dict:
-        """検証して TSV として原子書き込みする。エラーがあれば書き込まない。"""
+    def save(self, rules: list[dict], expected_loaded_at: float | None = None) -> dict:
+        """検証して TSV として原子書き込みする。エラーがあれば書き込まない。
+
+        expected_loaded_at を渡すと、ファイルの mtime がそれと一致するときだけ書き込む
+        （読んでから保存するまでに別の保存が入っていたら、上書きせずに conflict を返す）。
+        渡さなければ従来どおり無条件に書き込む。
+        """
         if not self.path:
             return {"error": "辞書ファイルのパスが未設定 (SPEECH_TTS_DICT)"}
         text = render_rules(rules)
         _, _, errors = self._parse(text)
         if errors:
             return {"saved": False, "errors": errors}
-        self._write_atomic(text)
-        self.reload(force=True)
+        # 確認から書き込みまでの間に別の保存が割り込まないよう、まとめてロックする
+        with self._save_lock:
+            if expected_loaded_at is not None:
+                current = self._stat()
+                if abs(current - float(expected_loaded_at)) > 1e-6:
+                    return {
+                        "saved": False,
+                        "conflict": True,
+                        "errors": ["読み込んだ後に辞書が更新されています。読み込み直してください"],
+                        "loaded_at": current,
+                    }
+            self._write_atomic(text)
+            self.reload(force=True)
         with self._lock:
             return {
                 "saved": True,
@@ -549,18 +566,25 @@ async def dict_post(body: dict):
 
     - rules: [{kind: "regex"|"literal", pattern, replacement}, ...] を渡す
     - content: TSV 文字列をそのまま渡す（rules が優先）
+    - expected_loaded_at（任意）: GET /dict の status.loaded_at。渡すと、その後に
+      別の保存が入っていた場合は書き込まず 409 を返す（上書き事故の予防）
     検証（タブ区切り・正規表現コンパイル・重複）に失敗したら書き込まず
     errors を返す。成功時は mtime 再読み込みで即反映される。
     """
+    expected = body.get("expected_loaded_at")
+    if expected is not None and not isinstance(expected, (int, float)):
+        raise HTTPException(status_code=400, detail="expected_loaded_at must be a number")
     if "rules" in body:
         rules = body["rules"]
         if not isinstance(rules, list):
             raise HTTPException(status_code=400, detail="rules must be a list")
-        result = tts_dict.save(rules)
+        result = tts_dict.save(rules, expected)
     elif "content" in body:
-        result = tts_dict.save(rules_from_tsv(body["content"]))
+        result = tts_dict.save(rules_from_tsv(body["content"]), expected)
     else:
         raise HTTPException(status_code=400, detail="rules or content is required")
+    if result.get("conflict"):
+        return JSONResponse(result, status_code=409)
     if not result.get("saved"):
         return JSONResponse(result, status_code=400)
     return result

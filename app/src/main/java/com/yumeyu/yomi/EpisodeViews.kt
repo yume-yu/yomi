@@ -3,7 +3,8 @@ package com.yumeyu.yomi
 import android.content.Context
 import android.text.format.DateFormat
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -80,6 +81,9 @@ class EpisodeActions(private val context: Context, private val store: EpisodeSto
         val p = SpeakService.playback.value
         if (p?.episodeId != episode.id || !p.isPlaying) play(episode)
     }
+
+    /** 作り直したチャンクを、新しい音声で頭から聞く */
+    fun restartFrom(episode: Episode, index: Int) = SpeakService.playEpisode(context, episode.id, startIndex = index)
 
     fun generate(episode: Episode) = GenerateService.enqueue(context, episode.id)
 
@@ -160,6 +164,7 @@ private fun EpisodeCard(
 
 // ---- エピソードのページ ----
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun EpisodeScreen(
     episode: Episode,
@@ -170,6 +175,8 @@ fun EpisodeScreen(
     onRestoreText: () -> Unit,
 ) {
     var confirmDelete by remember { mutableStateOf(false) }
+    /** 読みを直している段落。null なら閉じている */
+    var fixIndex by remember { mutableStateOf<Int?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -212,7 +219,7 @@ fun EpisodeScreen(
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 Text("スクリプト", style = MaterialTheme.typography.titleMedium)
                 Text(
-                    "タップするとそこから再生します。",
+                    "タップするとそこから再生、長押しで読みを直します。",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -230,15 +237,29 @@ fun EpisodeScreen(
                             else Modifier
                         )
                         .then(
-                            if (ready) Modifier.clickable {
-                                actions.playFrom(episode, episode.chunkStartMs(index))
-                            } else Modifier
+                            if (ready) Modifier.combinedClickable(
+                                onClick = { actions.playFrom(episode, episode.chunkStartMs(index)) },
+                                onLongClick = { fixIndex = index },
+                                onLongClickLabel = "読みを直す",
+                            ) else Modifier
                         )
                         .alpha(if (ready) 1f else 0.4f)
                         .padding(8.dp),
                 )
             }
         }
+    }
+
+    fixIndex?.let { index ->
+        FixReadingDialog(
+            episode = episode,
+            index = index,
+            onDismiss = { fixIndex = null },
+            onFixed = {
+                fixIndex = null
+                actions.restartFrom(episode, index)
+            },
+        )
     }
 
     if (confirmDelete) {
