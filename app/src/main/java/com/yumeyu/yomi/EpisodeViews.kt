@@ -2,6 +2,11 @@ package com.yumeyu.yomi
 
 import android.content.Context
 import android.text.format.DateFormat
+import android.widget.Toast
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -175,6 +180,9 @@ fun EpisodeScreen(
     onRestoreText: () -> Unit,
 ) {
     var confirmDelete by remember { mutableStateOf(false) }
+    var exporting by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     /** 読みを直している段落。null なら閉じている */
     var fixIndex by remember { mutableStateOf<Int?>(null) }
 
@@ -212,6 +220,23 @@ fun EpisodeScreen(
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onRestoreText) { Text("入力欄へ") }
+                    OutlinedButton(
+                        onClick = {
+                            exporting = true
+                            scope.launch {
+                                val msg = try {
+                                    "ダウンロードに保存しました: " + Export.saveToDownloads(context, episode)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    "保存できませんでした: ${e.message}"
+                                }
+                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                exporting = false
+                            }
+                        },
+                        enabled = episode.isComplete && !exporting,
+                    ) { Text(if (exporting) "保存中…" else "ダウンロードへ") }
                     OutlinedButton(onClick = { confirmDelete = true }) { Text("削除") }
                 }
             }

@@ -13,6 +13,7 @@
   - 作るだけ（再生しない）、作成のキャンセル、再生を止めても最後まで作る
   - 続きから再生、シークバー、スクリプトの段落をタップしてそこから再生
   - 一覧とページに、長さとファイルサイズを表示
+  - ページの「ダウンロードへ」で、1 本の Ogg Opus（`.ogg`）にして端末の「ダウンロード」に保存（Android 10 以降）
 - **その場で読みを直す**: エピソードの段落を長押しして、speech-proxy の読み辞書にルールを足し、その段落だけ作り直す
 - **読み辞書の編集**: speech-proxy の辞書編集画面（`/dict/ui`）をアプリ内で開く
 - **台本を作る**: 入力欄の文章を題材に、OpenWebUI のモデルに台本を書かせる（一人語り・掛け合い）
@@ -132,6 +133,7 @@ speech.cpp の前に立つ中継サーバーです。OpenWebUI や LiveKit な�
 | `ProcessTextActivity.kt` | 文字選択メニュー「Yomiあげる」 |
 | `TtsClient.kt` | speech-proxy から音声を取得し、キャッシュする |
 | `Voices.kt` | サーバーで使える声の一覧と、声を選ぶチップ |
+| `Export.kt` | エピソードの音声を 1 本の Ogg Opus に詰め直して保存する |
 | `TextSplitter.kt` | 文章を読み上げ用の段落に分ける |
 | `DictClient.kt` / `FixReading.kt` / `DictActivity.kt` | 読み辞書の API、その場で読みを直す、辞書の編集画面 |
 | `OpenWebUiClient.kt` / `ScriptService.kt` / `ScriptStore.kt` | OpenWebUI に台本を作らせて待つ、作成中の仕事と下書きの保存 |
