@@ -117,7 +117,7 @@ class GenerateService : Service() {
             notifyProgress(episode)
             val dest = store.chunkFile(id, i)
             try {
-                tts.fetch(server, episode.model, episode.voice, episode.chunks[i], dest, dictVersion)
+                tts.fetch(server, episode.model, episode.voiceOf(i), episode.chunks[i], dest, dictVersion)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

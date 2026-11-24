@@ -224,6 +224,15 @@ fun EpisodeScreen(
                 )
             }
             itemsIndexed(episode.chunks) { index, chunk ->
+                // 掛け合いでは、話し手が変わるところに声の名前を出す
+                if (episode.isDialogue && (index == 0 || episode.voiceOf(index) != episode.voiceOf(index - 1))) {
+                    Text(
+                        episode.voiceOf(index),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
                 val ready = index < episode.ready
                 val current = playback?.index == index
                 Text(
@@ -388,7 +397,7 @@ private fun describe(episode: Episode, status: GenStatus): String {
         !episode.isComplete -> "途中まで $progress"
         else -> formatDuration(episode.readyDurationMs)
     }
-    return "$date · ${episode.voice} · $state · ${formatSize(episode.readySizeBytes)}"
+    return "$date · ${episode.voicesLabel} · $state · ${formatSize(episode.readySizeBytes)}"
 }
 
 /** Android の「ファイル」アプリと同じく 1000 区切りで表す */

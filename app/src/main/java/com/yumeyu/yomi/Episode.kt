@@ -15,6 +15,8 @@ data class Episode(
     val model: String,
     val voice: String,
     val chunks: List<String>,
+    /** 掛け合いのとき、チャンクごとの声。空なら全チャンク [voice] */
+    val chunkVoices: List<String> = emptyList(),
     /** 先頭から作り終わったチャンクの数 */
     val ready: Int = 0,
     /** 作り終わったチャンクそれぞれの長さ（ミリ秒）。ready 個ぶん */
@@ -29,8 +31,16 @@ data class Episode(
 ) {
     val isComplete: Boolean get() = ready >= chunks.size
 
+    fun voiceOf(index: Int): String = chunkVoices.getOrNull(index) ?: voice
+
+    val isDialogue: Boolean get() = chunkVoices.distinct().size > 1
+
+    /** 一覧などに出す声の名前。掛け合いなら「kanna・girl」 */
+    val voicesLabel: String
+        get() = if (isDialogue) chunkVoices.distinct().joinToString("・") else voice
+
     val title: String
-        get() = text.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+        get() = text.lineSequence().map { it.trim().replace(SPEAKER_TAG, "") }.firstOrNull { it.isNotEmpty() }
             ?.let { if (it.length > TITLE_MAX) it.take(TITLE_MAX) + "…" else it }
             ?: "（空）"
 
@@ -66,6 +76,7 @@ data class Episode(
         .put("model", model)
         .put("voice", voice)
         .put("chunks", JSONArray(chunks))
+        .put("chunkVoices", JSONArray(chunkVoices))
         .put("ready", ready)
         .put("durationsMs", JSONArray(durationsMs))
         .put("sizesBytes", JSONArray(sizesBytes))
@@ -75,11 +86,15 @@ data class Episode(
 
     companion object {
         private const val TITLE_MAX = 40
+        private val SPEAKER_TAG = Regex("""^(【\s*[ABＡＢ]\s*】|[ABＡＢ]\s*[:：])\s*""")
 
         fun fromJson(o: JSONObject): Episode {
             val chunks = o.getJSONArray("chunks").let { a -> List(a.length()) { a.getString(it) } }
             val durations = o.optJSONArray("durationsMs")
                 ?.let { a -> List(a.length()) { a.getLong(it) } }
+                .orEmpty()
+            val chunkVoices = o.optJSONArray("chunkVoices")
+                ?.let { a -> List(a.length()) { a.getString(it) } }
                 .orEmpty()
             val sizes = o.optJSONArray("sizesBytes")
                 ?.let { a -> List(a.length()) { a.getLong(it) } }
@@ -91,6 +106,7 @@ data class Episode(
                 model = o.optString("model"),
                 voice = o.getString("voice"),
                 chunks = chunks,
+                chunkVoices = chunkVoices,
                 ready = o.optInt("ready"),
                 durationsMs = durations,
                 sizesBytes = sizes,

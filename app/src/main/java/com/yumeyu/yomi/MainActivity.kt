@@ -55,6 +55,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val notificationPermission =
@@ -167,7 +176,7 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
     /** 入力欄の文章からエピソードを作り、作成を始める。play なら作れた所から再生もする */
     fun createEpisode(play: Boolean) {
         save()
-        val episode = store.create(text, settings.model, settings.voice) ?: return
+        val episode = store.create(text, settings.model, settings.voice, settings.voiceA, settings.voiceB) ?: return
         GenerateService.enqueue(context, episode.id)
         if (play) SpeakService.playEpisode(context, episode.id)
         tab = TAB_EPISODES
@@ -216,6 +225,7 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
             }
             when (tab) {
                 TAB_INPUT -> InputTab(
+                    settings = settings,
                     text = text,
                     onTextChange = { text = it },
                     voice = voice,
@@ -257,6 +267,7 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
 
 @Composable
 private fun InputTab(
+    settings: Settings,
     text: String,
     onTextChange: (String) -> Unit,
     voice: String,
@@ -278,6 +289,18 @@ private fun InputTab(
     val clipboard = LocalClipboardManager.current
     /** 置き換えの確認中のクリップボードの文章。null なら確認ダイアログを出さない */
     var pendingClip by remember { mutableStateOf<String?>(null) }
+    var showScript by remember { mutableStateOf(false) }
+
+    if (showScript) {
+        ScriptDialog(
+            material = text,
+            onDismiss = { showScript = false },
+            onAccept = {
+                onTextChange(it)
+                showScript = false
+            },
+        )
+    }
 
     pendingClip?.let { clip ->
         AlertDialog(
@@ -305,6 +328,24 @@ private fun InputTab(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
+            FilledTonalButton(
+                onClick = {
+                    when {
+                        settings.owuiKey.isBlank() ||
+                            (settings.owuiModelMonologue.isBlank() && settings.owuiModelDialogue.isBlank()) ->
+                            Toast.makeText(
+                                context,
+                                "設定で OpenWebUI の API キーとモデルを入れてください",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        text.isBlank() ->
+                            Toast.makeText(context, "入力欄に題材を入れてください", Toast.LENGTH_SHORT).show()
+                        else -> showScript = true
+                    }
+                },
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                modifier = Modifier.height(36.dp),
+            ) { Text("台本を作る", style = MaterialTheme.typography.labelLarge) }
             Spacer(Modifier.weight(1f))
             FilledTonalButton(
                 onClick = {
@@ -378,6 +419,125 @@ private fun InputTab(
                 OutlinedButton(onClick = onClearCache) { Text("キャッシュを削除") }
             }
             OutlinedButton(onClick = { DictActivity.open(context) }) { Text("読み辞書を編集") }
+            ScriptSettings(settings)
         }
+    }
+}
+
+/** 台本の生成（OpenWebUI）と掛け合いの声の設定。ほかの設定とは別に保存する */
+@Composable
+private fun ScriptSettings(settings: Settings) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var url by rememberSaveable { mutableStateOf(settings.owuiUrl) }
+    var key by rememberSaveable { mutableStateOf(settings.owuiKey) }
+    var modelMono by rememberSaveable { mutableStateOf(settings.owuiModelMonologue) }
+    var modelDialogue by rememberSaveable { mutableStateOf(settings.owuiModelDialogue) }
+    /** モデルの一覧から選んだものを入れる先 */
+    var pickingFor by remember { mutableStateOf<Script.Mode?>(null) }
+    var voiceA by rememberSaveable { mutableStateOf(settings.voiceA) }
+    var voiceB by rememberSaveable { mutableStateOf(settings.voiceB) }
+    var models by remember { mutableStateOf<List<OpenWebUiClient.Model>?>(null) }
+    var loadingModels by remember { mutableStateOf(false) }
+
+    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+    Text("台本の生成（OpenWebUI）", style = MaterialTheme.typography.titleSmall)
+    OutlinedTextField(
+        value = url,
+        onValueChange = { url = it },
+        label = { Text("OpenWebUI の URL") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    OutlinedTextField(
+        value = key,
+        onValueChange = { key = it },
+        label = { Text("API キー") },
+        singleLine = true,
+        visualTransformation = PasswordVisualTransformation(),
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Text(
+        "プロンプトは OpenWebUI 側のカスタムモデルに設定してください（docs/openwebui-script-models.md）。",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    for ((mode, value) in listOf(Script.Mode.Monologue to modelMono, Script.Mode.Dialogue to modelDialogue)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { if (mode == Script.Mode.Dialogue) modelDialogue = it else modelMono = it },
+                label = { Text("${mode.label}用のモデル") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(
+                onClick = {
+                    loadingModels = true
+                    scope.launch {
+                        try {
+                            models = OpenWebUiClient(url, key).models()
+                            pickingFor = mode
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "モデルの一覧を取れませんでした: ${e.message}", Toast.LENGTH_LONG).show()
+                        }
+                        loadingModels = false
+                    }
+                },
+                enabled = !loadingModels && key.isNotBlank(),
+            ) { Text("一覧から") }
+        }
+    }
+    Text("掛け合いの声", style = MaterialTheme.typography.titleSmall)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        OutlinedTextField(
+            value = voiceA,
+            onValueChange = { voiceA = it },
+            label = { Text("A（案内役）") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+        OutlinedTextField(
+            value = voiceB,
+            onValueChange = { voiceB = it },
+            label = { Text("B（聞き手）") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+        )
+    }
+    Button(onClick = {
+        settings.owuiUrl = url
+        settings.owuiKey = key
+        settings.owuiModelMonologue = modelMono
+        settings.owuiModelDialogue = modelDialogue
+        settings.voiceA = voiceA
+        settings.voiceB = voiceB
+        Toast.makeText(context, "保存しました", Toast.LENGTH_SHORT).show()
+    }) { Text("台本の設定を保存") }
+
+    models?.let { list ->
+        AlertDialog(
+            onDismissRequest = { models = null },
+            title = { Text("${pickingFor?.label ?: ""}用のモデルを選ぶ") },
+            text = {
+                LazyColumn(modifier = Modifier.heightIn(max = 400.dp)) {
+                    items(list) { m ->
+                        Text(
+                            if (m.name == m.id) m.id else "${m.name}（${m.id}）",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (pickingFor == Script.Mode.Dialogue) modelDialogue = m.id else modelMono = m.id
+                                    models = null
+                                }
+                                .padding(vertical = 12.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { models = null }) { Text("閉じる") } },
+        )
     }
 }

@@ -35,16 +35,34 @@ class EpisodeStore private constructor(context: Context) {
 
     fun chunkFile(id: String, index: Int) = File(dir(id), "$index.ogg")
 
-    fun create(text: String, model: String, voice: String): Episode? {
-        val chunks = TextSplitter.split(text)
+    /**
+     * 文章からエピソードを作る。行の頭に【A】【B】が付いた掛け合いの台本なら、
+     * 発言ごとに段落を分け（話し手をまたいでまとめない）、A を [voiceA]、B を [voiceB] で読む。
+     */
+    fun create(text: String, model: String, voice: String, voiceA: String, voiceB: String): Episode? {
+        val dialogue = Script.parseDialogue(text)
+        val chunks = mutableListOf<String>()
+        val chunkVoices = mutableListOf<String>()
+        if (dialogue == null) {
+            chunks += TextSplitter.split(text)
+        } else {
+            for (line in dialogue) {
+                // 最初のチャンクだけ短くして、声が出るまでの待ちを減らす
+                val parts = if (chunks.isEmpty()) TextSplitter.split(line.text)
+                else TextSplitter.split(line.text, firstMax = 100)
+                chunks += parts
+                chunkVoices += List(parts.size) { if (line.speaker == 'B') voiceB else voiceA }
+            }
+        }
         if (chunks.isEmpty()) return null
         val episode = Episode(
             id = UUID.randomUUID().toString(),
             createdAt = System.currentTimeMillis(),
             text = text,
             model = model,
-            voice = voice,
+            voice = if (dialogue == null) voice else voiceA,
             chunks = chunks,
+            chunkVoices = chunkVoices,
         )
         dir(episode.id).mkdirs()
         save(episode)

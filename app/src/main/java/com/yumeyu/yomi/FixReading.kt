@@ -230,7 +230,7 @@ suspend fun regenerateChunk(context: Context, store: EpisodeStore, episode: Epis
     val target = store.chunkFile(episode.id, index)
     val tmp = File(target.parentFile, "$index.ogg.new")
     withContext(Dispatchers.IO) { tmp.delete() }
-    TtsClient(context).fetch(server, episode.model, episode.voice, episode.chunks[index], tmp, dictVersion)
+    TtsClient(context).fetch(server, episode.model, episode.voiceOf(index), episode.chunks[index], tmp, dictVersion)
     val (duration, size) = withContext(Dispatchers.IO) {
         if (!tmp.renameTo(target)) throw IOException("音声を差し替えられません")
         GenerateService.probeDurationMs(target) to target.length()
