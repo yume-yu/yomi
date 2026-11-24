@@ -62,13 +62,16 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 |---|---|---|
 | サーバー | `http://192.168.1.6:8090` | speech-proxy の URL |
 | モデル | 空欄 | 空欄ならサーバーの既定モデルを使う |
-| 声 | `kanna` | 一人で読むときの声 |
+| 声 | `kanna` | 一人で読むときの声。入力欄の下のチップで選ぶ |
 | OpenWebUI の URL | `http://192.168.1.7:3000` | 台本の生成に使う |
 | API キー | — | OpenWebUI の「設定 → アカウント → API キー」で作る。端末の中だけに保存する |
 | 一人語り用・掛け合い用のモデル | — | OpenWebUI 側で作ったカスタムモデル（下記） |
 | 一緒に有効にするフィルター ID | — | Web UI のトグルで切り替えるフィルター（thinking など）を API から使うとき |
 | 台本ができたらチャットを消す | オフ | オフなら、出典や考えた過程を OpenWebUI で見返せる |
 | 掛け合いの声 A・B | `kanna`・`girl` | 【A】【B】の行を読む声 |
+
+声の一覧は speech-proxy の `/v1/models`（`speech.voices`）から取ります。起動したときと、サーバーやモデルの設定を保存したときに取り直し、
+最後に取れた一覧は端末に覚えておきます。選んでいる声が一覧から消えたときは「（一覧にない）」と出ます。
 
 ### HTTP で使う場合
 
@@ -128,6 +131,7 @@ speech.cpp の前に立つ中継サーバーです。OpenWebUI や LiveKit な�
 | `SpeakService.kt` | 再生（Media3 の MediaSessionService）。通知から操作できる |
 | `ProcessTextActivity.kt` | 文字選択メニュー「Yomiあげる」 |
 | `TtsClient.kt` | speech-proxy から音声を取得し、キャッシュする |
+| `Voices.kt` | サーバーで使える声の一覧と、声を選ぶチップ |
 | `TextSplitter.kt` | 文章を読み上げ用の段落に分ける |
 | `DictClient.kt` / `FixReading.kt` / `DictActivity.kt` | 読み辞書の API、その場で読みを直す、辞書の編集画面 |
 | `OpenWebUiClient.kt` / `ScriptService.kt` / `ScriptStore.kt` | OpenWebUI に台本を作らせて待つ、作成中の仕事と下書きの保存 |

@@ -30,7 +30,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
@@ -140,6 +139,12 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
     var voice by rememberSaveable { mutableStateOf(settings.voice) }
     var server by rememberSaveable { mutableStateOf(settings.serverUrl) }
     var model by rememberSaveable { mutableStateOf(settings.model) }
+    remember { Voices.init(context) }
+    val voices by Voices.list.collectAsState()
+    /** 保存済みのサーバーとモデル。変わったら声の一覧を聞き直す */
+    var savedServer by remember { mutableStateOf(settings.serverUrl) }
+    var savedModel by remember { mutableStateOf(settings.model) }
+    LaunchedEffect(savedServer, savedModel) { Voices.refresh(context, savedServer, savedModel) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     var tab by rememberSaveable { mutableIntStateOf(TAB_INPUT) }
     /** 開いているエピソードのページ。null なら一覧 */
@@ -180,6 +185,8 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
         settings.voice = voice
         settings.serverUrl = server
         settings.model = model
+        savedServer = settings.serverUrl
+        savedModel = settings.model
     }
 
     /** 入力欄の文章からエピソードを作り、作成を始める。play なら作れた所から再生もする */
@@ -237,9 +244,9 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
                     settings = settings,
                     text = text,
                     onTextChange = { text = it },
+                    voices = voices,
                     voice = voice,
-                    onVoiceChange = { voice = it },
-                    onPresetVoice = { voice = it; settings.voice = it },
+                    onVoiceSelect = { voice = it; settings.voice = it },
                     server = server,
                     onServerChange = { server = it },
                     model = model,
@@ -279,9 +286,9 @@ private fun InputTab(
     settings: Settings,
     text: String,
     onTextChange: (String) -> Unit,
+    voices: List<String>,
     voice: String,
-    onVoiceChange: (String) -> Unit,
-    onPresetVoice: (String) -> Unit,
+    onVoiceSelect: (String) -> Unit,
     server: String,
     onServerChange: (String) -> Unit,
     model: String,
@@ -378,15 +385,7 @@ private fun InputTab(
                 .heightIn(min = 160.dp, max = 360.dp),
         )
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Settings.PRESET_VOICES.forEach { name ->
-                FilterChip(
-                    selected = voice == name,
-                    onClick = { onPresetVoice(name) },
-                    label = { Text(name) },
-                )
-            }
-        }
+        VoiceChips(voices = voices, selected = voice, onSelect = onVoiceSelect)
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onSpeak, enabled = text.isNotBlank()) { Text("読み上げる") }
@@ -429,26 +428,19 @@ private fun InputTab(
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
-                value = voice,
-                onValueChange = onVoiceChange,
-                label = { Text("声（一覧にないものも指定できます）") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onSaveSettings) { Text("保存") }
                 OutlinedButton(onClick = onClearCache) { Text("キャッシュを削除") }
             }
             OutlinedButton(onClick = { DictActivity.open(context) }) { Text("読み辞書を編集") }
-            ScriptSettings(settings)
+            ScriptSettings(settings, voices)
         }
     }
 }
 
 /** 台本の生成（OpenWebUI）と掛け合いの声の設定。ほかの設定とは別に保存する */
 @Composable
-private fun ScriptSettings(settings: Settings) {
+private fun ScriptSettings(settings: Settings, voices: List<String>) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var url by rememberSaveable { mutableStateOf(settings.owuiUrl) }
@@ -526,22 +518,10 @@ private fun ScriptSettings(settings: Settings) {
         Text("台本ができたら OpenWebUI のチャットを消す", style = MaterialTheme.typography.bodyMedium)
     }
     Text("掛け合いの声", style = MaterialTheme.typography.titleSmall)
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = voiceA,
-            onValueChange = { voiceA = it },
-            label = { Text("A（案内役）") },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-        )
-        OutlinedTextField(
-            value = voiceB,
-            onValueChange = { voiceB = it },
-            label = { Text("B（聞き手）") },
-            singleLine = true,
-            modifier = Modifier.weight(1f),
-        )
-    }
+    Text("A（案内役）", style = MaterialTheme.typography.bodySmall)
+    VoiceChips(voices = voices, selected = voiceA, onSelect = { voiceA = it })
+    Text("B（聞き手）", style = MaterialTheme.typography.bodySmall)
+    VoiceChips(voices = voices, selected = voiceB, onSelect = { voiceB = it })
     Button(onClick = {
         settings.owuiUrl = url
         settings.owuiKey = key
