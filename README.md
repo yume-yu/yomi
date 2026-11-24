@@ -66,6 +66,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 | OpenWebUI の URL | `http://192.168.1.7:3000` | 台本の生成に使う |
 | API キー | — | OpenWebUI の「設定 → アカウント → API キー」で作る。端末の中だけに保存する |
 | 一人語り用・掛け合い用のモデル | — | OpenWebUI 側で作ったカスタムモデル（下記） |
+| 一緒に有効にするフィルター ID | — | Web UI のトグルで切り替えるフィルター（thinking など）を API から使うとき |
+| 台本ができたらチャットを消す | オフ | オフなら、出典や考えた過程を OpenWebUI で見返せる |
 | 掛け合いの声 A・B | `kanna`・`girl` | 【A】【B】の行を読む声 |
 
 ### HTTP で使う場合
@@ -83,6 +85,12 @@ Yomi 自身が取得します（DownloadManager はシステムのプロセス�
 
 Yomi は題材（入力欄の文章）だけを送り、台本の書き方は OpenWebUI 側のカスタムモデルのシステムプロンプトに任せます。
 モデルの作り方とプロンプトの例は [docs/openwebui-script-models.md](docs/openwebui-script-models.md) にあります。
+
+検索込みの生成は数分〜10 分かかるので、Yomi は OpenWebUI にチャットとして生成を頼み、前面サービスで
+終わるまで様子を見に行きます。進み具合は通知に出し、できた台本は下書きとして読み上げタブに並びます。
+アプリが途中で落ちても、次に開いたときに続きを待ちます。
+
+OpenWebUI がリクエストの形によってどう動くかは、`tools/owui-probe.sh` で送り比べられます。
 
 掛け合い用のモデルは、各発言の行の頭に【A】か【B】を付けて出力してください。Yomi はこの印で話し手を見分けます。
 
@@ -122,6 +130,7 @@ speech.cpp の前に立つ中継サーバーです。OpenWebUI や LiveKit な�
 | `TtsClient.kt` | speech-proxy から音声を取得し、キャッシュする |
 | `TextSplitter.kt` | 文章を読み上げ用の段落に分ける |
 | `DictClient.kt` / `FixReading.kt` / `DictActivity.kt` | 読み辞書の API、その場で読みを直す、辞書の編集画面 |
-| `OpenWebUiClient.kt` / `Script.kt` / `ScriptDialog.kt` | 台本の生成と、掛け合いの台本の読み取り |
+| `OpenWebUiClient.kt` / `ScriptService.kt` / `ScriptStore.kt` | OpenWebUI に台本を作らせて待つ、作成中の仕事と下書きの保存 |
+| `Script.kt` / `ScriptDialog.kt` | 掛け合いの台本の読み取りと後始末、台本を頼むダイアログ |
 
 やりたいことと検討のメモは [ROADMAP.md](ROADMAP.md) にあります。
