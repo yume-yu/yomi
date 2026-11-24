@@ -66,5 +66,11 @@
             android:name=".GenerateService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- OpenWebUI に台本を作らせて、できるまで待つ。作成中は通知を出す -->
+        <service
+            android:name=".ScriptService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

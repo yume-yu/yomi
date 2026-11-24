@@ -1,91 +1,155 @@
 package com.yumeyu.yomi
 
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.channels.trySendBlocking
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
- * OpenWebUI の OpenAI 互換 API で台本を生成する。
- * API キーは OpenWebUI の「設定 → アカウント → API キー」で作ったもの。
+ * OpenWebUI で台本を生成する。API キーは OpenWebUI の「設定 → アカウント → API キー」で作ったもの。
+ *
+ * `/api/chat/completions` を素のまま呼ぶと、OpenWebUI は Web 検索もツールの往復も回さない。
+ * Web UI と同じく回してもらうには、OpenWebUI にチャットを作り、chat_id・返答の枠の id・session_id を
+ * 付けて頼む。生成はサーバー側で続くので、終わるまで [activeTasks] を見に行き、[assistantMessage] で読む。
+ * 参考: https://docs.openwebui.com/reference/server-side-tool-calling
  */
 class OpenWebUiClient(baseUrl: String, private val apiKey: String) {
     private val base = baseUrl.trimEnd('/')
 
     data class Model(val id: String, val name: String)
 
+    data class Message(val content: String, val done: Boolean, val sources: Int)
+
     suspend fun models(): List<Model> = withContext(Dispatchers.IO) {
-        val req = Request.Builder().url("$base/api/models").header("Authorization", "Bearer $apiKey").build()
-        http.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IOException(describe(resp.code, text))
-            val a = JSONObject(text).getJSONArray("data")
-            List(a.length()) { i ->
-                val m = a.getJSONObject(i)
-                Model(m.getString("id"), m.optString("name", m.getString("id")))
-            }
+        val a = get("/api/models").getJSONArray("data")
+        List(a.length()) { i ->
+            val m = a.getJSONObject(i)
+            Model(m.getString("id"), m.optString("name", m.getString("id")))
         }
     }
 
+    /** ユーザーのメッセージと、空の返答の枠を入れたチャットを作る。チャットの ID を返す */
+    suspend fun createChat(
+        model: String,
+        title: String,
+        prompt: String,
+        userId: String,
+        assistantId: String,
+    ): String = withContext(Dispatchers.IO) {
+        val ts = System.currentTimeMillis() / 1000
+        val messages = JSONObject()
+            .put(
+                userId,
+                JSONObject()
+                    .put("id", userId).put("parentId", JSONObject.NULL)
+                    .put("childrenIds", JSONArray().put(assistantId))
+                    .put("role", "user").put("content", prompt)
+                    .put("timestamp", ts).put("models", JSONArray().put(model)),
+            )
+            .put(
+                assistantId,
+                JSONObject()
+                    .put("id", assistantId).put("parentId", userId)
+                    .put("childrenIds", JSONArray())
+                    .put("role", "assistant").put("content", "")
+                    .put("model", model).put("modelName", model)
+                    .put("timestamp", ts).put("done", false),
+            )
+        val chat = JSONObject()
+            .put("title", title)
+            .put("models", JSONArray().put(model))
+            .put("history", JSONObject().put("currentId", assistantId).put("messages", messages))
+            .put("messages", JSONArray().put(JSONObject().put("id", userId).put("role", "user").put("content", prompt)))
+        post("/api/v1/chats/new", JSONObject().put("chat", chat)).getString("id")
+    }
+
     /**
-     * 生成された文字を、届いたそばから流す。
-     * 読み取りはブロックするので、キャンセルされたら通信ごと切って止める（awaitClose で call.cancel）。
+     * 生成を頼む。すぐに返り、生成はサーバー側で続く。
+     * features.web_search と variables（今日の日付など）は、Web UI が自分で付けているものなので、こちらでも付ける。
      */
-    fun stream(model: String, user: String): Flow<String> = callbackFlow {
-        // システムプロンプトは送らない。カスタムモデルに設定したものを使わせる
+    suspend fun startCompletion(
+        model: String,
+        prompt: String,
+        chatId: String,
+        userId: String,
+        assistantId: String,
+        sessionId: String,
+        filterIds: List<String>,
+        variables: Map<String, String>,
+    ): Unit = withContext(Dispatchers.IO) {
+        val vars = JSONObject()
+        variables.forEach { (k, v) -> vars.put(k, v) }
         val body = JSONObject()
             .put("model", model)
             .put("stream", true)
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", user)))
-        val req = Request.Builder()
-            .url("$base/api/chat/completions")
-            .header("Authorization", "Bearer $apiKey")
-            .post(body.toString().toRequestBody(JSON))
-            .build()
-        val call = http.newCall(req)
-        call.enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                close(e)
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                try {
-                    response.use { resp ->
-                        if (!resp.isSuccessful) throw IOException(describe(resp.code, resp.body?.string().orEmpty()))
-                        val source = resp.body!!.source()
-                        while (true) {
-                            val line = source.readUtf8Line() ?: break
-                            if (!line.startsWith("data:")) continue
-                            val data = line.removePrefix("data:").trim()
-                            if (data == "[DONE]") break
-                            val delta = runCatching {
-                                JSONObject(data).getJSONArray("choices").getJSONObject(0)
-                                    .optJSONObject("delta")?.optString("content", "")
-                            }.getOrNull()
-                            if (!delta.isNullOrEmpty()) trySendBlocking(delta)
-                        }
-                    }
-                    close()
-                } catch (e: Exception) {
-                    close(e)
-                }
-            }
-        })
-        awaitClose { call.cancel() }
+            .put("chat_id", chatId)
+            .put("id", assistantId)
+            .put("session_id", sessionId)
+            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", prompt)))
+            .put(
+                "user_message",
+                JSONObject().put("id", userId).put("parentId", JSONObject.NULL)
+                    .put("role", "user").put("content", prompt),
+            )
+            .put("features", JSONObject().put("web_search", true))
+            .put("variables", vars)
+            .put(
+                "background_tasks",
+                JSONObject().put("title_generation", false).put("tags_generation", false)
+                    .put("follow_up_generation", false),
+            )
+        if (filterIds.isNotEmpty()) body.put("filter_ids", JSONArray(filterIds))
+        val r = post("/api/chat/completions", body)
+        if (!r.optBoolean("status", false)) throw IOException("生成を始められませんでした: ${r.toString().take(200)}")
     }
+
+    /** そのチャットで動いている生成のタスク。空になったら終わり */
+    suspend fun activeTasks(chatId: String): List<String> = withContext(Dispatchers.IO) {
+        val a = get("/api/tasks/chat/$chatId").optJSONArray("task_ids") ?: JSONArray()
+        List(a.length()) { a.getString(it) }
+    }
+
+    suspend fun assistantMessage(chatId: String, assistantId: String): Message = withContext(Dispatchers.IO) {
+        val m = get("/api/v1/chats/$chatId").getJSONObject("chat")
+            .getJSONObject("history").getJSONObject("messages").optJSONObject(assistantId)
+            ?: return@withContext Message("", false, 0)
+        Message(
+            content = m.optString("content", ""),
+            done = m.optBoolean("done", false),
+            sources = m.optJSONArray("sources")?.length() ?: 0,
+        )
+    }
+
+    /** 生成を止める（Web UI の停止ボタンと同じもの。ドキュメントには無いので、失敗しても気にしない） */
+    suspend fun stopTask(taskId: String) = withContext(Dispatchers.IO) {
+        runCatching { post("/api/tasks/stop/$taskId", JSONObject()) }
+    }
+
+    suspend fun deleteChat(chatId: String) = withContext(Dispatchers.IO) {
+        runCatching {
+            http.newCall(request("/api/v1/chats/$chatId").delete().build()).execute().close()
+        }
+    }
+
+    private fun request(path: String) = Request.Builder().url(base + path).header("Authorization", "Bearer $apiKey")
+
+    private fun get(path: String): JSONObject = execute(request(path).build())
+
+    private fun post(path: String, body: JSONObject): JSONObject =
+        execute(request(path).post(body.toString().toRequestBody(JSON)).build())
+
+    private fun execute(req: Request): JSONObject =
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw IOException(describe(resp.code, text))
+            if (text.isBlank() || text == "null") JSONObject() else JSONObject(text)
+        }
 
     private fun describe(code: Int, body: String): String = when (code) {
         401, 403 -> "API キーが通りません（$code）。設定の API キーを確かめてください"
@@ -94,11 +158,9 @@ class OpenWebUiClient(baseUrl: String, private val apiKey: String) {
 
     companion object {
         private val JSON = "application/json".toMediaType()
-
-        // セルフホストのモデルは最初の文字まで時間がかかることがあるので、読み取りは長めに待つ
         private val http = OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.MINUTES)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .build()
     }
 }

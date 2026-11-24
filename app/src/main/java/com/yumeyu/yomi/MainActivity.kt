@@ -6,6 +6,11 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
+import android.text.format.DateFormat
+import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -83,6 +88,8 @@ class MainActivity : ComponentActivity() {
         }
 
         receiveShared(intent)
+        // 前回の台本の作成が終わる前にアプリが落ちていたら、続きを待つ（生成は OpenWebUI 側で続いている）
+        ScriptService.resumeIfPending(this)
 
         val settings = Settings(this)
         val store = EpisodeStore.get(this)
@@ -287,19 +294,14 @@ private fun InputTab(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
-    /** 置き換えの確認中のクリップボードの文章。null なら確認ダイアログを出さない */
+    /** 入力欄を置き換える前の確認中の文章（クリップボードや下書き）。null なら確認ダイアログを出さない */
     var pendingClip by remember { mutableStateOf<String?>(null) }
     var showScript by remember { mutableStateOf(false) }
+    val scriptProgress by ScriptService.progress.collectAsState()
+    val drafts by remember { ScriptStore.get(context) }.drafts.collectAsState()
 
     if (showScript) {
-        ScriptDialog(
-            material = text,
-            onDismiss = { showScript = false },
-            onAccept = {
-                onTextChange(it)
-                showScript = false
-            },
-        )
+        ScriptDialog(material = text, onDismiss = { showScript = false })
     }
 
     pendingClip?.let { clip ->
@@ -340,6 +342,8 @@ private fun InputTab(
                             ).show()
                         text.isBlank() ->
                             Toast.makeText(context, "入力欄に題材を入れてください", Toast.LENGTH_SHORT).show()
+                        scriptProgress != null ->
+                            Toast.makeText(context, "いま作成中の台本が終わってから頼んでください", Toast.LENGTH_SHORT).show()
                         else -> showScript = true
                     }
                 },
@@ -386,6 +390,22 @@ private fun InputTab(
             Button(onClick = onSpeak, enabled = text.isNotBlank()) { Text("読み上げる") }
             OutlinedButton(onClick = onGenerateOnly, enabled = text.isNotBlank()) { Text("作るだけ") }
             OutlinedButton(onClick = onStop) { Text("止める") }
+        }
+
+        scriptProgress?.let { p ->
+            ScriptProgressCard(p, onCancel = { ScriptService.cancel(context) })
+        }
+        if (drafts.isNotEmpty()) {
+            Text("台本の下書き", style = MaterialTheme.typography.titleSmall)
+            drafts.forEach { draft ->
+                DraftCard(
+                    draft = draft,
+                    onUse = {
+                        if (text.isBlank()) onTextChange(draft.script) else pendingClip = draft.script
+                    },
+                    onDelete = { ScriptStore.get(context).deleteDraft(draft.id) },
+                )
+            }
         }
 
         TextButton(onClick = onToggleSettings) {
@@ -437,6 +457,8 @@ private fun ScriptSettings(settings: Settings) {
     var pickingFor by remember { mutableStateOf<Script.Mode?>(null) }
     var voiceA by rememberSaveable { mutableStateOf(settings.voiceA) }
     var voiceB by rememberSaveable { mutableStateOf(settings.voiceB) }
+    var filterIds by rememberSaveable { mutableStateOf(settings.owuiFilterIds.joinToString(", ")) }
+    var deleteChats by rememberSaveable { mutableStateOf(settings.owuiDeleteChats) }
     var models by remember { mutableStateOf<List<OpenWebUiClient.Model>?>(null) }
     var loadingModels by remember { mutableStateOf(false) }
 
@@ -489,6 +511,18 @@ private fun ScriptSettings(settings: Settings) {
             ) { Text("一覧から") }
         }
     }
+    OutlinedTextField(
+        value = filterIds,
+        onValueChange = { filterIds = it },
+        label = { Text("一緒に有効にするフィルター ID（カンマ区切り）") },
+        placeholder = { Text("例: thinking_sampling_presets") },
+        singleLine = true,
+        modifier = Modifier.fillMaxWidth(),
+    )
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = deleteChats, onCheckedChange = { deleteChats = it })
+        Text("台本ができたら OpenWebUI のチャットを消す", style = MaterialTheme.typography.bodyMedium)
+    }
     Text("掛け合いの声", style = MaterialTheme.typography.titleSmall)
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         OutlinedTextField(
@@ -513,6 +547,8 @@ private fun ScriptSettings(settings: Settings) {
         settings.owuiModelDialogue = modelDialogue
         settings.voiceA = voiceA
         settings.voiceB = voiceB
+        settings.owuiFilterIds = filterIds.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        settings.owuiDeleteChats = deleteChats
         Toast.makeText(context, "保存しました", Toast.LENGTH_SHORT).show()
     }) { Text("台本の設定を保存") }
 
@@ -538,6 +574,51 @@ private fun ScriptSettings(settings: Settings) {
             },
             confirmButton = {},
             dismissButton = { TextButton(onClick = { models = null }) { Text("閉じる") } },
+        )
+    }
+}
+
+@Composable
+private fun ScriptProgressCard(p: ScriptService.Progress, onCancel: () -> Unit) {
+    val elapsed = (System.currentTimeMillis() - p.startedAt) / 1000
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("台本を作成中（${p.mode.label}）", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                "%d:%02d 経過".format(elapsed / 60, elapsed % 60) +
+                    if (p.chars > 0) "・本文 ${p.chars} 文字" else "・調べています",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            TextButton(onClick = onCancel) { Text("キャンセル") }
+        }
+    }
+}
+
+@Composable
+private fun DraftCard(draft: ScriptStore.Draft, onUse: () -> Unit, onDelete: () -> Unit) {
+    var confirmDelete by remember { mutableStateOf(false) }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(draft.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "${DateFormat.format("M/d HH:mm", draft.createdAt)} · ${draft.mode.label} · ${draft.script.length} 文字" +
+                    if (draft.sources > 0) " · 出典 ${draft.sources} 件" else "",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = onUse) { Text("入力欄に入れる") }
+                TextButton(onClick = { confirmDelete = true }) { Text("削除") }
+            }
+        }
+    }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text("下書きを削除しますか？") },
+            text = { Text(draft.title) },
+            confirmButton = { TextButton(onClick = { confirmDelete = false; onDelete() }) { Text("削除") } },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("やめる") } },
         )
     }
 }

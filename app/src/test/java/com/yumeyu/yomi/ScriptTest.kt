@@ -44,4 +44,11 @@ class ScriptTest {
         assertTrue(Script.isThinking("<think>途中"))
         assertFalse(Script.isThinking("<think>済</think>本文"))
     }
+
+    @Test
+    fun cleansOpenWebUiContent() {
+        val content = "<details type=\"reasoning\" done=\"true\">\n<summary>Thought</summary>\n> 考え中\n</details>\n" +
+            "<details type=\"tool_calls\" done=\"true\">ツール</details>\n【A】本文です。"
+        assertEquals("【A】本文です。", Script.clean(content))
+    }
 }

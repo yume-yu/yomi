@@ -40,6 +40,20 @@ class Settings(context: Context) {
         get() = prefs.getString("owui_model_dialogue", "") ?: ""
         set(v) = prefs.edit().putString("owui_model_dialogue", v.trim()).apply()
 
+    /**
+     * 生成を頼むときに一緒に有効にするフィルター（OpenWebUI の関数の ID）。
+     * Web UI のトグルで切り替えるフィルター（thinking など）は、Web UI がリクエストに入れているので、
+     * API から使うときはここで指定する。カンマ区切りで保存する
+     */
+    var owuiFilterIds: List<String>
+        get() = (prefs.getString("owui_filter_ids", "") ?: "").split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        set(v) = prefs.edit().putString("owui_filter_ids", v.joinToString(",")).apply()
+
+    /** 台本ができたら OpenWebUI のチャットを消すか。残せば、出典や考えた過程を Web UI で見返せる */
+    var owuiDeleteChats: Boolean
+        get() = prefs.getBoolean("owui_delete_chats", false)
+        set(v) = prefs.edit().putBoolean("owui_delete_chats", v).apply()
+
     fun owuiModel(mode: Script.Mode): String =
         if (mode == Script.Mode.Dialogue) owuiModelDialogue else owuiModelMonologue
 

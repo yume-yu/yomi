@@ -26,6 +26,15 @@ object Script {
         return (if (open >= 0) closed.substring(0, open) else closed).trimStart()
     }
 
+    /**
+     * OpenWebUI のチャットから読んだ返答を、台本だけにする。
+     * <think>…</think> に加え、OpenWebUI が推論やツール呼び出しを折りたたんで入れる <details>…</details> も取り除く。
+     */
+    fun clean(content: String): String =
+        stripThinking(DETAILS_BLOCK.replace(content, "")).trim()
+
+    private val DETAILS_BLOCK = Regex("<details\\b[^>]*>[\\s\\S]*?</details>")
+
     /** まだ <think> の中にいるか（生成中の表示用） */
     fun isThinking(text: String): Boolean = THINK_BLOCK.replace(text, "").contains("<think>")
 
