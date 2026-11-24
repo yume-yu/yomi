@@ -65,6 +65,8 @@ class ScriptStore private constructor(context: Context) {
         val script: String,
         val sources: Int,
         val chatId: String?,
+        /** 頼んでからできあがるまでにかかった時間。記録する前に作った下書きは 0 */
+        val elapsedMs: Long = 0,
     ) {
         val title: String
             get() = script.lineSequence().map { it.trim().replace(SPEAKER_TAG, "") }
@@ -73,6 +75,7 @@ class ScriptStore private constructor(context: Context) {
         fun toJson(): JSONObject = JSONObject()
             .put("id", id).put("createdAt", createdAt).put("mode", mode.name)
             .put("script", script).put("sources", sources).put("chatId", chatId ?: JSONObject.NULL)
+            .put("elapsedMs", elapsedMs)
 
         companion object {
             private val SPEAKER_TAG = Regex("""^(【\s*[ABＡＢ]\s*】|[ABＡＢ]\s*[:：])\s*""")
@@ -84,6 +87,7 @@ class ScriptStore private constructor(context: Context) {
                 script = o.getString("script"),
                 sources = o.optInt("sources"),
                 chatId = if (o.isNull("chatId")) null else o.getString("chatId"),
+                elapsedMs = o.optLong("elapsedMs"),
             )
         }
     }

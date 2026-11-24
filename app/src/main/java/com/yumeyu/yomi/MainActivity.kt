@@ -52,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -68,6 +69,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -580,7 +582,15 @@ private fun ScriptSettings(settings: Settings) {
 
 @Composable
 private fun ScriptProgressCard(p: ScriptService.Progress, onCancel: () -> Unit) {
-    val elapsed = (System.currentTimeMillis() - p.startedAt) / 1000
+    // 進み具合は文字数が増えたときにしか届かない（調べている間は変わらない）ので、経過時間は自分で 1 秒ごとに進める
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1_000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val elapsed = (now - p.startedAt).coerceAtLeast(0) / 1000
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("台本を作成中（${p.mode.label}）", style = MaterialTheme.typography.bodyLarge)
@@ -603,7 +613,8 @@ private fun DraftCard(draft: ScriptStore.Draft, onUse: () -> Unit, onDelete: () 
             Text(draft.title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 "${DateFormat.format("M/d HH:mm", draft.createdAt)} · ${draft.mode.label} · ${draft.script.length} 文字" +
-                    if (draft.sources > 0) " · 出典 ${draft.sources} 件" else "",
+                    (if (draft.sources > 0) " · 出典 ${draft.sources} 件" else "") +
+                    (if (draft.elapsedMs > 0) " · 作成 ${formatElapsed(draft.elapsedMs)}" else ""),
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {

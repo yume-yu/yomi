@@ -106,6 +106,7 @@ class ScriptService : Service() {
                 val message = waitUntilDone(client, job, chatId)
                 val script = Script.clean(message.content)
                 if (script.isBlank()) throw IllegalStateException("台本が空でした")
+                val elapsedMs = System.currentTimeMillis() - job.startedAt
                 store.addDraft(
                     ScriptStore.Draft(
                         id = job.id,
@@ -114,10 +115,14 @@ class ScriptService : Service() {
                         script = script,
                         sources = message.sources,
                         chatId = chatId,
+                        elapsedMs = elapsedMs,
                     )
                 )
                 if (settings.owuiDeleteChats) client.deleteChat(chatId)
-                notifyResult("台本ができました", script.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty())
+                notifyResult(
+                    "台本ができました（${formatElapsed(elapsedMs)}）",
+                    script.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty(),
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -314,4 +319,10 @@ class ScriptService : Service() {
             context.startService(Intent(context, ScriptService::class.java).setAction(ACTION_CANCEL))
         }
     }
+}
+
+/** かかった時間を「5分12秒」のように表す */
+fun formatElapsed(ms: Long): String {
+    val s = ms / 1000
+    return if (s >= 60) "${s / 60}分${s % 60}秒" else "${s}秒"
 }
