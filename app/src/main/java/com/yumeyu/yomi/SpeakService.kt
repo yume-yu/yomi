@@ -3,6 +3,14 @@ package com.yumeyu.yomi
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Bundle
+import androidx.media3.session.CommandButton
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
+import androidx.media3.session.SessionResult
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import android.widget.Toast
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
@@ -83,7 +91,10 @@ class SpeakService : MediaSessionService() {
             .build()
         player.addListener(errorListener)
         player.addListener(progressListener)
-        session = MediaSession.Builder(this, player).build()
+        session = MediaSession.Builder(this, player)
+            .setCallback(sessionCallback)
+            .setMediaButtonPreferences(skipButtons)
+            .build()
         addSession(session)
 
         // 画面のシークバー用に、再生位置を定期的に配る
@@ -92,6 +103,92 @@ class SpeakService : MediaSessionService() {
                 publishPlayback()
                 delay(PUBLISH_INTERVAL_MS)
             }
+        }
+    }
+
+    // ---- 通知の 10 秒戻し・送り ----
+
+    private val skipBack = SessionCommand(COMMAND_SKIP_BACK, Bundle.EMPTY)
+    private val skipForward = SessionCommand(COMMAND_SKIP_FORWARD, Bundle.EMPTY)
+
+    /** 通知のボタン。前・次の段落の位置に置き換えて出す */
+    private val skipButtons by lazy {
+        ImmutableList.of(
+            CommandButton.Builder(CommandButton.ICON_SKIP_BACK_10)
+                .setDisplayName("10 秒戻す")
+                .setSessionCommand(skipBack)
+                .setSlots(CommandButton.SLOT_BACK)
+                .build(),
+            CommandButton.Builder(CommandButton.ICON_SKIP_FORWARD_10)
+                .setDisplayName("10 秒送る")
+                .setSessionCommand(skipForward)
+                .setSlots(CommandButton.SLOT_FORWARD)
+                .build(),
+        )
+    }
+
+    private val sessionCallback = object : MediaSession.Callback {
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+        ): MediaSession.ConnectionResult {
+            if (!session.isMediaNotificationController(controller)) {
+                return MediaSession.ConnectionResult.AcceptedResultBuilder(session).build()
+            }
+            // 通知（とシステムのメディア操作）には、段落の前・次の代わりに 10 秒戻し・送りを出す
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                .setAvailableSessionCommands(
+                    MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
+                        .add(skipBack).add(skipForward).build()
+                )
+                .setAvailablePlayerCommands(
+                    MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS.buildUpon()
+                        .removeAll(
+                            Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM,
+                            Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM,
+                        )
+                        .build()
+                )
+                .setMediaButtonPreferences(skipButtons)
+                .build()
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: SessionCommand,
+            args: Bundle,
+        ): ListenableFuture<SessionResult> {
+            when (customCommand.customAction) {
+                COMMAND_SKIP_BACK -> skipBy(-SKIP_MS)
+                COMMAND_SKIP_FORWARD -> skipBy(SKIP_MS)
+                else -> return Futures.immediateFuture(SessionResult(SessionError.ERROR_NOT_SUPPORTED))
+            }
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+        }
+    }
+
+    /**
+     * 今の位置から deltaMs だけ進める・戻す。エピソードは段落をまたいで動かす
+     * （ExoPlayer の seekBack/seekForward は 1 つの段落の中でしか動かないため）
+     */
+    private fun skipBy(deltaMs: Long) {
+        if (player.mediaItemCount == 0) return
+        val episode = episodeId?.let { store.get(it) }
+        if (episode == null) {
+            // 使い捨ての読み上げは、今の段落の中だけで動かす
+            val duration = player.duration.takeIf { it != C.TIME_UNSET } ?: Long.MAX_VALUE
+            player.seekTo((player.currentPosition + deltaMs).coerceIn(0, duration))
+            return
+        }
+        val now = episode.globalPositionMs(player.currentMediaItemIndex, player.currentPosition)
+        val readyMs = episode.durationsMs.take(player.mediaItemCount).sum()
+        val target = (now + deltaMs).coerceIn(0, (readyMs - 500).coerceAtLeast(0))
+        val (index, position) = episode.locate(target)
+        if (index in 0 until player.mediaItemCount) {
+            player.seekTo(index, position)
+            saveProgress()
+            publishPlayback()
         }
     }
 
@@ -298,6 +395,9 @@ class SpeakService : MediaSessionService() {
     }
 
     companion object {
+        private const val COMMAND_SKIP_BACK = "com.yumeyu.yomi.SKIP_BACK"
+        private const val COMMAND_SKIP_FORWARD = "com.yumeyu.yomi.SKIP_FORWARD"
+        private const val SKIP_MS = 10_000L
         private const val ACTION_SPEAK = "com.yumeyu.yomi.SPEAK"
         private const val ACTION_PLAY_EPISODE = "com.yumeyu.yomi.PLAY_EPISODE"
         private const val ACTION_STOP = "com.yumeyu.yomi.STOP"

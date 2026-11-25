@@ -3,6 +3,17 @@ package com.yumeyu.yomi
 import android.content.Context
 import android.text.format.DateFormat
 import android.widget.Toast
+import androidx.compose.foundation.layout.Box
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.FilledIconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.CancellationException
@@ -72,6 +83,21 @@ class EpisodeActions(private val context: Context, private val store: EpisodeSto
     }
 
     fun pause() = SpeakService.pause(context)
+
+    /** 直前に飛ばした先と時刻。再生位置の知らせは 0.5 秒ごとなので、続けて押したときはこちらを起点にする */
+    private var lastSkip: Pair<Long, Long>? = null
+
+    /** 今の位置から deltaMs だけ進める・戻す */
+    fun skip(episode: Episode, deltaMs: Long) {
+        val now = System.currentTimeMillis()
+        val p = SpeakService.playback.value?.takeIf { it.episodeId == episode.id }
+        val from = lastSkip?.takeIf { now - it.second < 1_000 }?.first
+            ?: p?.let { episode.globalPositionMs(it.index, it.positionMs) }
+            ?: episode.resumeGlobalMs
+        val target = (from + deltaMs).coerceIn(0, (episode.readyDurationMs - 500).coerceAtLeast(0))
+        lastSkip = target to now
+        seek(episode, target)
+    }
 
     /** エピソード全体での位置に移動する。再生していなければ「続きから」の位置を変える */
     fun seek(episode: Episode, globalMs: Long) {
@@ -184,6 +210,7 @@ fun EpisodeScreen(
 ) {
     var confirmDelete by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
+    var menuOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     /** 読みを直している段落。null なら閉じている */
@@ -232,31 +259,44 @@ fun EpisodeScreen(
                 }
             }
             EpisodeSeekBar(episode, playback, onSeek = { actions.seek(episode, it) })
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PlayPauseButton(episode, playback, actions, primary = true)
-                GenerateButton(episode, status, actions)
+            Box(modifier = Modifier.fillMaxWidth()) {
+                PlayerControls(episode, playback, actions, modifier = Modifier.align(Alignment.Center))
+                Box(modifier = Modifier.align(Alignment.CenterEnd)) {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(Icons.Filled.MoreVert, contentDescription = "その他")
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("入力欄へ") },
+                            onClick = { menuOpen = false; onRestoreText() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (exporting) "保存中…" else "ダウンロードへ") },
+                            enabled = episode.isComplete && !exporting,
+                            onClick = {
+                                menuOpen = false
+                                exporting = true
+                                scope.launch {
+                                    val msg = try {
+                                        "ダウンロードに保存しました: " + Export.saveToDownloads(context, episode)
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: Exception) {
+                                        "保存できませんでした: ${e.message}"
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                    exporting = false
+                                }
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("削除", color = MaterialTheme.colorScheme.error) },
+                            onClick = { menuOpen = false; confirmDelete = true },
+                        )
+                    }
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = onRestoreText) { Text("入力欄へ") }
-                OutlinedButton(
-                    onClick = {
-                        exporting = true
-                        scope.launch {
-                            val msg = try {
-                                "ダウンロードに保存しました: " + Export.saveToDownloads(context, episode)
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                "保存できませんでした: ${e.message}"
-                            }
-                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                            exporting = false
-                        }
-                    },
-                    enabled = episode.isComplete && !exporting,
-                ) { Text(if (exporting) "保存中…" else "ダウンロードへ") }
-                OutlinedButton(onClick = { confirmDelete = true }) { Text("削除") }
-            }
+            GenerateButton(episode, status, actions)
             Row(
                 modifier = Modifier.padding(top = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -340,7 +380,10 @@ fun EpisodeScreen(
             title = { Text("削除しますか？") },
             text = { Text(episode.title) },
             confirmButton = {
-                TextButton(onClick = { confirmDelete = false; actions.delete(episode) }) { Text("削除") }
+                TextButton(
+                    onClick = { confirmDelete = false; actions.delete(episode) },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) { Text("削除") }
             },
             dismissButton = {
                 TextButton(onClick = { confirmDelete = false }) { Text("やめる") }
@@ -441,6 +484,41 @@ private fun PlayPauseButton(
     if (primary) Button(onClick = onClick) { Text(label) }
     else TextButton(onClick = onClick) { Text(label) }
 }
+
+@Composable
+private fun PlayerControls(
+    episode: Episode,
+    playback: PlaybackInfo?,
+    actions: EpisodeActions,
+    modifier: Modifier = Modifier,
+) {
+    val playing = playback?.isPlaying == true
+    val canPlay = episode.ready > 0
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = { actions.skip(episode, -SKIP_MS) }, enabled = canPlay, modifier = Modifier.size(56.dp)) {
+            Icon(PlayerIcons.Replay10, contentDescription = "10 秒戻す", modifier = Modifier.size(36.dp))
+        }
+        FilledIconButton(
+            onClick = { if (playing) actions.pause() else actions.play(episode) },
+            modifier = Modifier.size(56.dp),
+        ) {
+            Icon(
+                if (playing) PlayerIcons.Pause else Icons.Filled.PlayArrow,
+                contentDescription = if (playing) "一時停止" else "再生",
+                modifier = Modifier.size(36.dp),
+            )
+        }
+        IconButton(onClick = { actions.skip(episode, SKIP_MS) }, enabled = canPlay, modifier = Modifier.size(56.dp)) {
+            Icon(PlayerIcons.Forward10, contentDescription = "10 秒送る", modifier = Modifier.size(36.dp))
+        }
+    }
+}
+
+private const val SKIP_MS = 10_000L
 
 @Composable
 private fun GenerateButton(episode: Episode, status: GenStatus, actions: EpisodeActions) {
