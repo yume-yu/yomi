@@ -25,6 +25,7 @@
 Yomi（Android）
  ├─ speech-proxy（proxy.py, FastAPI）── speech.cpp（Irodori-TTS など）
  │    /v1/audio/speech  Markdown 除去・読み辞書の置換 → 合成 → Ogg Opus に変換
+ │    /v1/models        モデルと声の一覧（speech.cpp の応答をそのまま中継）
  │    /dict/...         読み辞書の取得・保存・プレビュー・編集画面
  └─ OpenWebUI（任意）
       /api/chat/completions  台本の生成
