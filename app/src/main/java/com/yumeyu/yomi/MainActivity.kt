@@ -1,6 +1,10 @@
 package com.yumeyu.yomi
 
 import android.Manifest
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -158,6 +162,7 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
             text = shared.text
             tab = TAB_INPUT
             openId = null
+            showSettings = false
         }
     }
 
@@ -205,6 +210,7 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
         if (openId != null && opened == null) openId = null
     }
     BackHandler(enabled = openId != null) { openId = null }
+    BackHandler(enabled = openId == null && showSettings) { showSettings = false }
 
     Scaffold { padding ->
         Column(
@@ -228,6 +234,26 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
                 )
                 return@Column
             }
+            if (showSettings) {
+                SettingsScreen(
+                    settings = settings,
+                    voices = voices,
+                    server = server,
+                    onServerChange = { server = it },
+                    model = model,
+                    onModelChange = { model = it },
+                    onSave = {
+                        save()
+                        Toast.makeText(context, "保存しました", Toast.LENGTH_SHORT).show()
+                    },
+                    onClearCache = {
+                        TtsClient.clearCache(context)
+                        Toast.makeText(context, "キャッシュを削除しました", Toast.LENGTH_SHORT).show()
+                    },
+                    onBack = { showSettings = false },
+                )
+                return@Column
+            }
 
             TabRow(selectedTabIndex = tab) {
                 Tab(selected = tab == TAB_INPUT, onClick = { tab = TAB_INPUT }, text = { Text("読み上げ") })
@@ -247,26 +273,13 @@ private fun MainScreen(settings: Settings, store: EpisodeStore, shared: Shared) 
                     voices = voices,
                     voice = voice,
                     onVoiceSelect = { voice = it; settings.voice = it },
-                    server = server,
-                    onServerChange = { server = it },
-                    model = model,
-                    onModelChange = { model = it },
-                    showSettings = showSettings,
-                    onToggleSettings = { showSettings = !showSettings },
+                    onOpenSettings = { showSettings = true },
                     onSpeak = { createEpisode(play = true) },
                     onGenerateOnly = {
                         createEpisode(play = false)
                         Toast.makeText(context, "作成を始めました", Toast.LENGTH_SHORT).show()
                     },
                     onStop = { SpeakService.stop(context) },
-                    onSaveSettings = {
-                        save()
-                        Toast.makeText(context, "保存しました", Toast.LENGTH_SHORT).show()
-                    },
-                    onClearCache = {
-                        TtsClient.clearCache(context)
-                        Toast.makeText(context, "キャッシュを削除しました", Toast.LENGTH_SHORT).show()
-                    },
                 )
                 else -> EpisodesTab(
                     episodes = episodes,
@@ -289,17 +302,10 @@ private fun InputTab(
     voices: List<String>,
     voice: String,
     onVoiceSelect: (String) -> Unit,
-    server: String,
-    onServerChange: (String) -> Unit,
-    model: String,
-    onModelChange: (String) -> Unit,
-    showSettings: Boolean,
-    onToggleSettings: () -> Unit,
+    onOpenSettings: () -> Unit,
     onSpeak: () -> Unit,
     onGenerateOnly: () -> Unit,
     onStop: () -> Unit,
-    onSaveSettings: () -> Unit,
-    onClearCache: () -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -385,7 +391,17 @@ private fun InputTab(
                 .heightIn(min = 160.dp, max = 360.dp),
         )
 
-        VoiceChips(voices = voices, selected = voice, onSelect = onVoiceSelect)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            VoiceChips(
+                voices = voices,
+                selected = voice,
+                onSelect = onVoiceSelect,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onOpenSettings) {
+                Icon(Icons.Filled.Settings, contentDescription = "設定")
+            }
+        }
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = onSpeak, enabled = text.isNotBlank()) { Text("読み上げる") }
@@ -409,11 +425,36 @@ private fun InputTab(
             }
         }
 
-        TextButton(onClick = onToggleSettings) {
-            Text(if (showSettings) "設定を閉じる" else "設定")
-        }
+    }
+}
 
-        if (showSettings) {
+/** 設定のページ。読み上げタブの歯車から開く */
+@Composable
+private fun SettingsScreen(
+    settings: Settings,
+    voices: List<String>,
+    server: String,
+    onServerChange: (String) -> Unit,
+    model: String,
+    onModelChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onClearCache: () -> Unit,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = onBack) { Text("← 戻る") }
+            Text("設定", style = MaterialTheme.typography.titleMedium)
+        }
+        Column(
+            modifier = Modifier
+                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("読み上げ（speech-proxy）", style = MaterialTheme.typography.titleSmall)
             OutlinedTextField(
                 value = server,
                 onValueChange = onServerChange,
@@ -429,7 +470,7 @@ private fun InputTab(
                 modifier = Modifier.fillMaxWidth(),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onSaveSettings) { Text("保存") }
+                Button(onClick = onSave) { Text("保存") }
                 OutlinedButton(onClick = onClearCache) { Text("キャッシュを削除") }
             }
             OutlinedButton(onClick = { DictActivity.open(context) }) { Text("読み辞書を編集") }
