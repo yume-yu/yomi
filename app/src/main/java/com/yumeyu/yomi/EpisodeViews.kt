@@ -22,6 +22,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.interaction.DragInteraction
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -186,19 +189,39 @@ fun EpisodeScreen(
     /** 読みを直している段落。null なら閉じている */
     var fixIndex by remember { mutableStateOf<Int?>(null) }
 
+    // 再生中の段落にスクリプトを追従させる。自分でスクロールしたら追従をやめ、
+    // 段落のタップや「再生位置へ」で戻す
+    val scriptState = rememberLazyListState()
+    var follow by remember { mutableStateOf(true) }
+    LaunchedEffect(scriptState) {
+        scriptState.interactionSource.interactions.collect {
+            if (it is DragInteraction.Start) follow = false
+        }
+    }
+    val currentIndex = playback?.index
+    LaunchedEffect(currentIndex, follow) {
+        if (!follow || currentIndex == null || currentIndex !in episode.chunks.indices) return@LaunchedEffect
+        // 今の段落を上から 1/5 くらいの所に置き、前の段落も少し見えるようにする
+        val offset = -scriptState.layoutInfo.viewportSize.height / 5
+        scriptState.animateScrollToItem(currentIndex, offset)
+    }
+
     Column(modifier = Modifier.fillMaxSize()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text("← 一覧") }
         }
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 32.dp),
+        // プレイヤー部分は固定し、スクリプトだけをスクロールさせる
+        Column(
+            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            item {
-                Text(episode.title, style = MaterialTheme.typography.titleLarge)
-            }
-            item {
+            Text(
+                episode.title,
+                style = MaterialTheme.typography.titleLarge,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Column {
                 Text(describe(episode, status), style = MaterialTheme.typography.bodyMedium)
                 episode.error?.let {
                     Text(
@@ -208,46 +231,58 @@ fun EpisodeScreen(
                     )
                 }
             }
-            item {
-                EpisodeSeekBar(episode, playback, onSeek = { actions.seek(episode, it) })
+            EpisodeSeekBar(episode, playback, onSeek = { actions.seek(episode, it) })
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PlayPauseButton(episode, playback, actions, primary = true)
+                GenerateButton(episode, status, actions)
             }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PlayPauseButton(episode, playback, actions, primary = true)
-                    GenerateButton(episode, status, actions)
-                }
-            }
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onRestoreText) { Text("入力欄へ") }
-                    OutlinedButton(
-                        onClick = {
-                            exporting = true
-                            scope.launch {
-                                val msg = try {
-                                    "ダウンロードに保存しました: " + Export.saveToDownloads(context, episode)
-                                } catch (e: CancellationException) {
-                                    throw e
-                                } catch (e: Exception) {
-                                    "保存できませんでした: ${e.message}"
-                                }
-                                Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
-                                exporting = false
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = onRestoreText) { Text("入力欄へ") }
+                OutlinedButton(
+                    onClick = {
+                        exporting = true
+                        scope.launch {
+                            val msg = try {
+                                "ダウンロードに保存しました: " + Export.saveToDownloads(context, episode)
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                "保存できませんでした: ${e.message}"
                             }
-                        },
-                        enabled = episode.isComplete && !exporting,
-                    ) { Text(if (exporting) "保存中…" else "ダウンロードへ") }
-                    OutlinedButton(onClick = { confirmDelete = true }) { Text("削除") }
+                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                            exporting = false
+                        }
+                    },
+                    enabled = episode.isComplete && !exporting,
+                ) { Text(if (exporting) "保存中…" else "ダウンロードへ") }
+                OutlinedButton(onClick = { confirmDelete = true }) { Text("削除") }
+            }
+            Row(
+                modifier = Modifier.padding(top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("スクリプト", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "タップするとそこから再生、長押しで読みを直します。",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                if (!follow && currentIndex != null) {
+                    TextButton(onClick = { follow = true }) { Text("再生位置へ") }
                 }
             }
-            item {
-                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                Text("スクリプト", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    "タップするとそこから再生、長押しで読みを直します。",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+        }
+        // ここから下（スクリプト）だけがスクロールする
+        HorizontalDivider()
+        LazyColumn(
+            state = scriptState,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 32.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             itemsIndexed(episode.chunks) { index, chunk ->
                 // 掛け合いでは、話し手が変わるところに声の名前を出す
                 if (episode.isDialogue && (index == 0 || episode.voiceOf(index) != episode.voiceOf(index - 1))) {
@@ -272,7 +307,10 @@ fun EpisodeScreen(
                         )
                         .then(
                             if (ready) Modifier.combinedClickable(
-                                onClick = { actions.playFrom(episode, episode.chunkStartMs(index)) },
+                                onClick = {
+                                    follow = true
+                                    actions.playFrom(episode, episode.chunkStartMs(index))
+                                },
                                 onLongClick = { fixIndex = index },
                                 onLongClickLabel = "読みを直す",
                             ) else Modifier
